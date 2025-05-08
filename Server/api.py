@@ -1,12 +1,16 @@
 # Server/api.py
+import base64
 import io
 import time
 from pathlib import Path
 
+import cv2
+import numpy as np
 import torch
 from PIL import Image
 from fastapi import FastAPI, File, UploadFile, HTTPException
 from fastapi.responses import JSONResponse, FileResponse
+from pydantic import BaseModel
 
 # ---- local modules ----
 from DFINE.detection import load_model, process_image  # <—— fixed
@@ -77,6 +81,40 @@ async def get_annotated_image():
 @app.get("/health")
 def health():
     return {"status": "ok"}
+
+
+# Class for the frame payload
+class Frame(BaseModel):
+    frame: str  # Base64 encoded image frame
+
+
+# Endpoint for receiving video frames
+@app.post("/upload_frame")
+async def upload_frame(frame: Frame):
+    try:
+        # Decode the base64 image frame
+        img_data = base64.b64decode(frame.frame)
+        nparr = np.frombuffer(img_data, np.uint8)  # Convert bytes to NumPy array
+        decoded_frame = cv2.imdecode(nparr, cv2.IMREAD_COLOR)  # Decode the frame into an image
+        decoded_frame_rgb = cv2.cvtColor(decoded_frame, cv2.COLOR_BGR2RGB)
+
+        # Display the frame (optional)
+        cv2.imshow("Received Video", decoded_frame_rgb)
+
+        # If you want to process or save the frame, you can do that here
+        # For example, you could run inference or save the frame
+
+        # You could use D-FINE or any other model to process the frame
+        # Here is where you would call your model to process the `decoded_frame`
+
+        # Check for a keypress to break out of the loop (useful for debugging)
+        if cv2.waitKey(1) & 0xFF == ord('q'):
+            return JSONResponse(content={"message": "Stream stopped"}, status_code=200)
+
+        return JSONResponse(content={"message": "Frame received and processed"}, status_code=200)
+
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Error processing frame: {e}")
 
 
 # -----------------------------------------------------------
