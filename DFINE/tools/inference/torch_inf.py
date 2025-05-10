@@ -13,8 +13,7 @@ import torchvision.transforms as T
 from PIL import Image, ImageDraw
 
 sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), "../../")))
-from src.core import YAMLConfig
-
+from DFINE.src.core import YAMLConfig
 
 OBJECTS365_CLASSES = [
     (0, 'Person'),
@@ -384,11 +383,15 @@ OBJECTS365_CLASSES = [
     (364, 'Table Tennis')
 ]
 
-def draw(images, labels, boxes, scores, thrh=0.4):
+
+def draw(images, labels, boxes, scores, thrh=0.8):
     for i, im in enumerate(images):
         draw = ImageDraw.Draw(im)
 
         scr = scores[i]
+        keep = scr > thrh
+        if keep.sum() == 0:  # nothing to draw → skip
+            continue
         lab = labels[i][scr > thrh]
         box = boxes[i][scr > thrh]
         scrs = scr[scr > thrh]
@@ -396,7 +399,7 @@ def draw(images, labels, boxes, scores, thrh=0.4):
         for j, b in enumerate(box):
             draw.rectangle(list(b), outline="red")
             class_id = lab[j].item()
-            class_name = OBJECTS365_CLASSES[class_id-1] if class_id < len(OBJECTS365_CLASSES) else f"Class_{class_id}"
+            class_name = OBJECTS365_CLASSES[class_id - 1] if class_id < len(OBJECTS365_CLASSES) else f"Class_{class_id}"
             draw.text(
                 (b[0], b[1]),
                 text=f"{class_name} {round(scrs[j].item(), 2)}",

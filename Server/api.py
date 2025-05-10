@@ -1,86 +1,77 @@
 # Server/api.py
 import base64
 import io
+import threading
 import time
-from pathlib import Path
+from typing import Optional
 
 import cv2
 import numpy as np
 import torch
+import torch.nn as nn
+import torchvision.transforms as T
 from PIL import Image
-from fastapi import FastAPI, File, UploadFile, HTTPException
-from fastapi.responses import JSONResponse, FileResponse
+from fastapi import FastAPI, HTTPException
+from fastapi.responses import JSONResponse, StreamingResponse
 from pydantic import BaseModel
 
 # ---- local modules ----
-from DFINE.detection import load_model, process_image  # <—— fixed
+from DFINE.tools.inference.torch_inf import YAMLConfig, OBJECTS365_CLASSES, draw
+from Server.helper import videoHelper
+
+
+# ────────────────────────────────────────────────────────────────────────────
+
+# ─── build & warm-load the D-FINE model exactly the way torch_inf does ─────
+def build_dfine_model(cfg_path: str, ckpt_path: str, device: str = "cpu"):
+    """Replicates the Model() logic from torch_inf, but returns a ready model."""
+    cfg = YAMLConfig(cfg_path, resume=ckpt_path)
+
+    # stop HGNetv2 layers from re-downloading ImageNet weights
+    if "HGNetv2" in cfg.yaml_cfg:
+        cfg.yaml_cfg["HGNetv2"]["pretrained"] = False
+
+    ckpt = torch.load(ckpt_path, map_location="cpu", weights_only=True)
+    state = ckpt["ema"]["module"] if "ema" in ckpt else ckpt["model"]
+    cfg.model.load_state_dict(state)
+
+    class DeployModel(nn.Module):
+        def __init__(self):
+            super().__init__()
+            self.model = cfg.model.deploy()
+            self.post = cfg.postprocessor.deploy()
+
+        def forward(self, imgs, orig_sizes):
+            return self.post(self.model(imgs), orig_sizes)
+
+    return DeployModel().to(device).eval()
+
+
+# ─── single-image inference that works on a PIL.Image (not a file-path) ────
+_resize_to = (640, 640)
+_tf = T.Compose([T.Resize(_resize_to), T.ToTensor()])
+
+
+def torch_inf_pil(model, pil_img: Image.Image, device: str):
+    """Return labels, boxes, scores → identical to detection.py output."""
+    w, h = pil_img.size
+    img_tensor = _tf(pil_img).unsqueeze(0).to(device)
+    labels, boxes, scores = model(img_tensor, torch.tensor([[w, h]], device=device))
+    return labels, boxes, scores
+
 
 # ---- model paths ----
-ROOT = Path(__file__).resolve().parent.parent  # project_root/
-CONFIG_PATH = ROOT / "DFINE/configs/dfine/objects365/dfine_hgnetv2_x_obj365.yml"
-WEIGHTS_PATH = ROOT / "DFINE/model/dfine_x_obj365.pth"
-
+MODEL_CFG = "../DFINE/configs/dfine/objects365/dfine_hgnetv2_x_obj365.yml"
+MODEL_WEI = "../DFINE/model/dfine_x_obj365.pth"
 DEVICE = "cuda:0" if torch.cuda.is_available() else "cpu"
-model = load_model(str(CONFIG_PATH), str(WEIGHTS_PATH), DEVICE)  # load **once** at startup
+
+model = build_dfine_model(str(MODEL_CFG), str(MODEL_WEI), DEVICE)
 
 app = FastAPI(title="D‑FINE Object Detection API")
 
-
-# -----------------------------------------------------------
-@app.post("/detect")
-async def detect(file: UploadFile = File(...)):
-    try:
-        t0 = time.time()
-
-        if not file.content_type.startswith("image/"):
-            raise HTTPException(status_code=400, detail="File must be an image")
-
-        img_bytes = await file.read()
-        image_pil = Image.open(io.BytesIO(img_bytes)).convert("RGB")
-
-        # ---------- inference ----------
-        results, annotated_image = process_image(model, DEVICE, image_pil)
-
-        # ---------- save / encode ----------
-        annotated_path = Path("output_annotated.jpg")
-        annotated_image.save(annotated_path)
-
-        response = []
-        for idx, res in enumerate(results):
-            crop_path = f"results/cropped_{res['class_name']}_{idx}.jpg"
-            res["cropped_image"].save(crop_path)
-
-            # make everything JSON‑serialisable
-            confidence = float(res["confidence"])  # tensor → float
-            box = [float(x) for x in res["box"]]  # tensor list → Python list
-
-            response.append({
-                "class_name": res["class_name"],
-                "confidence": confidence,
-                "box": box,
-                "cropped_image_path": crop_path
-            })
-
-        # -------- delete the annotated file --------
-        annotated_path.unlink(missing_ok=True)  # delete the file
-        return JSONResponse(content=response)
-
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
-
-
-# -----------------------------------------------------------
-@app.get("/annotated_image")
-async def get_annotated_image():
-    file = Path("output_annotated.jpg")
-    if not file.exists():
-        raise HTTPException(status_code=404, detail="Annotated image not found")
-    return FileResponse(file)
-
-
-@app.get("/health")
-def health():
-    return {"status": "ok"}
+# global holder for the latest annotated JPEG
+latest_jpeg: Optional[bytes] = None
+jpeg_lock = threading.Lock()
 
 
 # Class for the frame payload
@@ -88,33 +79,84 @@ class Frame(BaseModel):
     frame: str  # Base64 encoded image frame
 
 
-# Endpoint for receiving video frames
+@app.get("/health")
+def health():
+    return {"status": "ok"}
+
+
+# ╭──────────────────────────────────────────────────────╮
+# │ 1)  Receive, run inference, store annotated jpeg     │
+# ╰──────────────────────────────────────────────────────╯
 @app.post("/upload_frame")
 async def upload_frame(frame: Frame):
+    global latest_jpeg
     try:
-        # Decode the base64 image frame
-        img_data = base64.b64decode(frame.frame)
-        nparr = np.frombuffer(img_data, np.uint8)  # Convert bytes to NumPy array
-        decoded_frame = cv2.imdecode(nparr, cv2.IMREAD_COLOR)  # Decode the frame into an image
-        decoded_frame_rgb = cv2.cvtColor(decoded_frame, cv2.COLOR_BGR2RGB)
+        # ── 1. decode incoming base64 JPEG → OpenCV BGR ───────────────────
+        img_bytes = base64.b64decode(frame.frame)
+        nparr = np.frombuffer(img_bytes, np.uint8)
+        bgr = cv2.imdecode(nparr, cv2.IMREAD_COLOR)
 
-        # Display the frame (optional)
-        cv2.imshow("Received Video", decoded_frame_rgb)
+        # ── 2. inference with D-FINE ───────────────────────────────────────
+        pil_img = Image.fromarray(cv2.cvtColor(bgr, cv2.COLOR_BGR2RGB))
+        labels, boxes, scores = torch_inf_pil(model, pil_img, DEVICE)
+        results = [
+            {
+                "class_name": OBJECTS365_CLASSES[l.item() - 1][1],
+                "confidence": s.item(),
+                "box": b.tolist()
+            }
+            for l, b, s in zip(labels[0], boxes[0], scores[0]) if s > 0.4
+        ]
+        # now draw boxes for the video feed
+        annotated_pil = pil_img.copy()
+        draw([annotated_pil], labels, boxes, scores, thrh=0.8)
 
-        # If you want to process or save the frame, you can do that here
-        # For example, you could run inference or save the frame
+        # --- build sidebar & compose final frame ----------------------------
+        panel_img = videoHelper.build_detection_panel(results, annotated_pil.height)
+        composite = videoHelper.side_by_side(annotated_pil, panel_img)
 
-        # You could use D-FINE or any other model to process the frame
-        # Here is where you would call your model to process the `decoded_frame`
+        buf = io.BytesIO()
+        composite.save(buf, format="JPEG", quality=85)
+        with jpeg_lock:
+            latest_jpeg = buf.getvalue()
 
-        # Check for a keypress to break out of the loop (useful for debugging)
-        if cv2.waitKey(1) & 0xFF == ord('q'):
-            return JSONResponse(content={"message": "Stream stopped"}, status_code=200)
-
-        return JSONResponse(content={"message": "Frame received and processed"}, status_code=200)
+        # ── 4. return just the detections summary ──────────────────────────
+        detections = [
+            {
+                "class_name": r["class_name"],
+                "confidence": float(r["confidence"]),
+                "box": [float(x) for x in r["box"]],
+            } for r in results
+        ]
+        return JSONResponse({"detections": detections}, status_code=200)
 
     except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Error processing frame: {e}")
+        print(e)
+        raise HTTPException(status_code=500,
+                            detail=f"Error processing frame: {e}")
+
+
+# ╭──────────────────────────────────────────────────────╮
+# │ 2)  Live MJPEG stream anyone can watch at /video     │
+# ╰──────────────────────────────────────────────────────╯
+def mjpeg_generator():
+    """Yields the newest annotated JPEG as a multipart/x-mixed-replace stream."""
+    boundary = b"--frame\r\n"
+    while True:
+        with jpeg_lock:
+            frame_jpeg = latest_jpeg
+        if frame_jpeg is not None:
+            yield boundary
+            yield b"Content-Type: image/jpeg\r\n\r\n" + frame_jpeg + b"\r\n"
+        time.sleep(0.05)  # ~20 fps push; no harm if slower upstream
+
+
+@app.get("/video")
+def video():
+    return StreamingResponse(
+        mjpeg_generator(),
+        media_type="multipart/x-mixed-replace; boundary=frame"
+    )
 
 
 # -----------------------------------------------------------
