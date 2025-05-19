@@ -1,5 +1,8 @@
 # Server/api.py
 import os
+from pathlib import Path
+
+from DFINE.tools.inference.trt_inf import TRTInference
 
 os.environ["KMP_DUPLICATE_LIB_OK"] = "TRUE"
 
@@ -12,7 +15,7 @@ import numpy as np
 from fastapi import FastAPI, Request, Response, UploadFile
 from fastapi.responses import StreamingResponse
 
-from processor.processor import process_loop, ocr
+from processor.processorTensor import process_loop
 
 app = FastAPI(title="D‑FINE Object Detection API")
 # limit queue to 30 frames to prevent backlog
@@ -21,10 +24,16 @@ frame_queue = queue.Queue(MAX_QUEUE_SIZE)
 jpeg_lock = threading.Lock()
 latest_jpeg = {"frame": b""}
 
+# ── paths & constants ─────────────────────────────────────────────────────
+PROJECT_ROOT = Path(__file__).resolve().parent.parent
+TENSOR_MODEL = PROJECT_ROOT / "DFINE" / "model" / "model.engine"
+DEVICE = "cuda:0"
+ENGINE = TRTInference(TENSOR_MODEL)
+
 # start the background consumer
 threading.Thread(
     target=process_loop,
-    args=(frame_queue, jpeg_lock, latest_jpeg),
+    args=(frame_queue, ENGINE, DEVICE),
     daemon=True
 ).start()
 

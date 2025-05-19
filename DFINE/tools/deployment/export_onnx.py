@@ -18,7 +18,7 @@ from src.core import YAMLConfig
 
 
 def main(
-    args,
+        args,
 ):
     """main"""
     cfg = YAMLConfig(args.config, resume=args.resume)
@@ -27,7 +27,7 @@ def main(
         cfg.yaml_cfg["HGNetv2"]["pretrained"] = False
 
     if args.resume:
-        checkpoint = torch.load(args.resume, map_location="cpu")
+        checkpoint = torch.load(args.resume, map_location="cuda")
         if "ema" in checkpoint:
             state = checkpoint["ema"]["module"]
         else:
@@ -42,7 +42,7 @@ def main(
 
     class Model(nn.Module):
         def __init__(
-            self,
+                self,
         ) -> None:
             super().__init__()
             self.model = cfg.model.deploy()
@@ -55,7 +55,7 @@ def main(
 
     model = Model()
 
-    data = torch.rand(32, 3, 640, 640)
+    data = torch.rand(1, 3, 640, 640)
     size = torch.tensor([[640, 640]])
     _ = model(data, size)
 
