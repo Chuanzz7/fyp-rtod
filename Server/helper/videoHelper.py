@@ -1,37 +1,61 @@
 from PIL import Image, ImageDraw, ImageFont
 
-PANEL_W = 220  # width of the info sidebar
-FONT = ImageFont.load_default()  # use a TTF of your choice
-
 def build_detection_panel(results, height):
     """
-    Return an RGB PIL image (PANEL_W × height) with
-    • class name and detector confidence
-    • optional OCR text and its confidence
+    Return an RGB PIL image (PANEL_W × height) with:
+    • Class name and detector confidence (large font)
+    • Optional OCR text and its confidence (smaller font, colored)
     """
-    panel = Image.new("RGB", (PANEL_W, height), (20, 20, 20))
-    draw  = ImageDraw.Draw(panel)
+    PANEL_W = 350  # Set as appropriate
+    PADDING_X = 18
+    PADDING_Y = 16
+    LINE_SPACING = 8
+    DETECTION_GAP = 16
+    PRIMARY_FONT = ImageFont.truetype("arial.ttf", 22)   # Adjust font path and size
+    SECONDARY_FONT = ImageFont.truetype("arial.ttf", 16) # For OCR text
 
-    y = 10
+    BG_COLOR = (15, 15, 15)
+    TEXT_COLOR = (255, 255, 255)
+    OCR_COLOR = (140, 210, 255)
+    HIGH_CONF_COLOR = (110, 255, 110)
+    MID_CONF_COLOR  = (255, 210, 80)
+    LOW_CONF_COLOR  = (255, 100, 100)
+
+    panel = Image.new("RGB", (PANEL_W, height), BG_COLOR)
+    draw = ImageDraw.Draw(panel)
+
+    y = PADDING_Y
     for r in results:
-        # ── line-1 : detector output ─────────────────────────────────────────
-        label = f"{r['class_name']:<12}  {r['confidence']*100:5.1f}%"
-        draw.text((10, y), label, fill=(255, 255, 255), font=FONT)
-        y += 14
+        # Confidence color
+        conf = r['confidence']
+        if conf > 0.8:
+            conf_color = HIGH_CONF_COLOR
+        elif conf > 0.5:
+            conf_color = MID_CONF_COLOR
+        else:
+            conf_color = LOW_CONF_COLOR
 
-        # ── line-2 : OCR (if available) ───────────────────────────────────
-        if r.get("ocr_results"):  # list is present and non-empty
-            for o in r["ocr_results"]:  # draw every OCR string …
-                ocr_label = f" ↳ {o['ocr_text'][:24]}  ({o['ocr_conf'] * 100:4.1f}%)"
-                draw.text((18, y), ocr_label,
-                          fill=(180, 220, 255), font=FONT)
-                y += 14  # advance for next line
-                if y > height - 18:  # stop if panel is full
+        # ── line-1 : Detector output ──
+        label = f"{r['class_name']:<12}  {conf*100:5.1f}%"
+        draw.text((PADDING_X, y), label, fill=conf_color, font=PRIMARY_FONT)
+        y += PRIMARY_FONT.size + LINE_SPACING
+
+        # ── line-2+: OCR results (if available) ──
+        if r.get("ocr_results"):
+            for o in r["ocr_results"]:
+                ocr_text = o['ocr_text']
+                # Truncate with ellipsis
+                max_chars = 28
+                ocr_text = (ocr_text[:max_chars] + '…') if len(ocr_text) > max_chars else ocr_text
+                ocr_label = f"  ↳ {ocr_text} ({o['ocr_conf']*100:4.1f}%)"
+                draw.text((PADDING_X + 12, y), ocr_label, fill=OCR_COLOR, font=SECONDARY_FONT)
+                y += SECONDARY_FONT.size + LINE_SPACING // 2
+                if y > height - PADDING_Y - 20:
                     break
 
-        # leave a small gap before the next detection
-        y += 4
-        if y > height - 18:          # stop when panel is full
+        # Gap before next detection
+        y += DETECTION_GAP
+        if y > height - PADDING_Y - 20:
             break
 
     return panel

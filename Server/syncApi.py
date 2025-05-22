@@ -14,6 +14,7 @@ PROJECT_ROOT = Path(__file__).resolve().parent.parent
 TENSOR_MODEL = PROJECT_ROOT / "DFINE" / "model" / "model.engine"
 DEVICE = "cuda:0"
 ENGINE = TRTInference(TENSOR_MODEL)
+
 # Global pre-allocated tensors
 _input_tensor = None
 _orig_size = None
@@ -38,6 +39,9 @@ def initialize_buffers(device="cuda:0"):
     torch.cuda.synchronize()
 
     print("Buffers initialized and GPU warmed up")
+
+
+initialize_buffers()
 
 
 def fast_preprocess(img, out_tensor=None):
@@ -105,6 +109,7 @@ async def upload_frame(request: Request):
     data = await request.body()
     # 1) Decode JPEG → BGR
     img = cv2.imdecode(np.frombuffer(data, np.uint8), cv2.IMREAD_COLOR)
+
     if img is None:
         print("  !! JPEG decode failed – skipping frame")
 
@@ -113,9 +118,6 @@ async def upload_frame(request: Request):
 
     # Extract results
     labels, boxes, scores = output["labels"], output["boxes"], output["scores"]
-
-    # 3) Process results as needed
-    # ... (draw boxes, update latest_jpeg, etc.)
 
     print(f"Preprocess: {preprocess_time:.2f} ms | Inference: {inference_time:.2f} ms | Total: {total_time:.2f} ms")
     return Response(status_code=200)

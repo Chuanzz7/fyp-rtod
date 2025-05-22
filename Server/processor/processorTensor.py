@@ -1,61 +1,27 @@
-# processor.py
-from __future__ import annotations
-
-"""
-Main background worker that pulls JPEG frames from the queue, runs
-object‑detection (D‑FINE exported to ONNX) and OCR (PaddleOCR), draws the
-results and stores the latest composite as a JPEG byte‑string that the
-FastAPI endpoint can return on demand.
-
-2025‑05‑18 • patch‑02
-─────────────────────
-Fixes the onnxruntime ``INVALID_ARGUMENT: Unexpected input data type …
-expected: (tensor(int64))`` error.
-
-Cause: we were always sending ``orig_target_sizes`` as *float32* when the
-exported graph actually declares that input as *int64*.
-
-Fix: look at the **TensorProto** type string and build the NumPy array with
-``dtype=np.int64`` whenever the graph says so (and default to *float32*
-otherwise).
-"""
-
-# ── stdlib & third‑party ──────────────────────────────────────────────────
-import threading
+import queue
 import time
+from multiprocessing import Queue
 from pathlib import Path
-from typing import Optional
 
 import cv2
 import numpy as np
 import torch
+from PIL import Image
+from paddleocr import PaddleOCR
 
-# ── local modules ─────────────────────────────────────────────────────────
 from DFINE.tools.inference.trt_inf import TRTInference, draw
+from Server.helper.dataClass import COCO_CLASSES
 
-
-# global holder for the latest annotated JPEG
-latest_jpeg: Optional[bytes] = None
-jpeg_lock = threading.Lock()
-
-# ╔═══════════════════════════════════════════════════════════════════════╗
-# ║ 1.  Build the Tensor Runtime session                                    ║
-# ╚═══════════════════════════════════════════════════════════════════════╝
-
-
-# Global pre-allocated tensors
-_input_tensor = None
-_orig_size = None
+# ── paths & constants ─────────────────────────────────────────────────────
+PROJECT_ROOT = Path(__file__).resolve().parent.parent.parent
+TENSOR_MODEL = PROJECT_ROOT / "DFINE" / "model" / "model.engine"
+DEVICE = "cuda:0"
 
 
 def initialize_buffers(device="cuda:0"):
-    """Initialize global buffers once at startup"""
     global _input_tensor, _orig_size
-
-    # Make sure device is properly handled
     if isinstance(device, str):
         device = torch.device(device)
-
     _input_tensor = torch.empty((1, 3, 640, 640), dtype=torch.float32, device=device)
     _orig_size = torch.empty((1, 2), dtype=torch.int32, device=device)
 
@@ -64,7 +30,6 @@ def initialize_buffers(device="cuda:0"):
     for _ in range(10):
         _ = dummy_data + 1.0
     torch.cuda.synchronize()
-
     print("Buffers initialized and GPU warmed up")
 
 
@@ -98,7 +63,7 @@ def fast_preprocess(img, out_tensor=None):
         return out_tensor
 
 
-def optimized_inference(engine, img, device="cuda:0"):
+def optimized_inference(engine, _input_tensor, _orig_size, img, ):
     """
     Highly optimized inference pipeline
 
@@ -110,11 +75,6 @@ def optimized_inference(engine, img, device="cuda:0"):
     Returns:
         Detection results and timing information
     """
-    global _input_tensor, _orig_size
-
-    # Initialize buffers if not already done
-    if _input_tensor is None:
-        initialize_buffers(device)
 
     h, w = img.shape[:2]
 
@@ -147,44 +107,72 @@ def optimized_inference(engine, img, device="cuda:0"):
     return output, inference_time
 
 
-# ╔═══════════════════════════════════════════════════════════════════════╗
-# ║ 3.  Main processing loop                                              ║
-# ╚═══════════════════════════════════════════════════════════════════════╝
+def processor_tensor_main(frame_input_queue: Queue, output_queue: Queue):
+    initialize_buffers()
+    ENGINE = TRTInference(TENSOR_MODEL)
+    ocr = PaddleOCR(use_angle_cls=True, lang="en", show_log=False)
+    print("Inference & OCR buffers ready, waiting for frames...")
 
-
-def process_loop(frame_queue, engine, device="cuda:0"):
-    """
-    Replacement for the process_loop function with optimized inference
-    """
-    # Initialize buffers once
-    initialize_buffers(device)
-
+    frame_id = 0
     while True:
-        frame_packet = frame_queue.get()
-        if frame_packet is None:
-            break
-
-        frame_id = frame_packet["frame_id"]
-        frame = frame_packet["data"]
-
         try:
-            # 1) Decode JPEG → BGR
-            img = cv2.imdecode(np.frombuffer(frame, np.uint8), cv2.IMREAD_COLOR)
-            if img is None:
-                print("  !! JPEG decode failed – skipping frame")
+            frame = frame_input_queue.get(timeout=1)
+        except queue.Empty:
+            continue
+
+        img = cv2.imdecode(np.frombuffer(frame, np.uint8), cv2.IMREAD_COLOR)
+        if img is None:
+            print("JPEG decode failed – skipping frame")
+            continue
+
+        output, inference_time = optimized_inference(ENGINE, _input_tensor, _orig_size, img)
+        print(f"  ▸ Optimized Inference: {inference_time:.1f} ms")
+        labels, boxes, scores = output["labels"], output["boxes"], output["scores"]
+
+        cropped_images, box_meta, panel_rows = [], [], []
+        for i in range(boxes.shape[1]):  # boxes: [1, N, 4]
+            score = scores[0, i].item()
+            if score < 0.4:
+                continue
+            x1, y1, x2, y2 = [int(boxes[0, i, j].item()) for j in range(4)]
+            crop = img[y1:y2, x1:x2]
+            if crop.size == 0:
+                continue
+            cropped_images.append(crop)
+            box_meta.append((x1, y1, x2, y2))
+
+        # OCR each crop
+        t_ocr_start = time.perf_counter()
+        ocr_results = [ocr.ocr(crop, det=True, cls=True) for crop in cropped_images]
+        t_ocr_end = time.perf_counter()
+        print(f"OCR (batch): {(t_ocr_end - t_ocr_start) * 1000:.1f} ms")
+
+        for (x1, y1, x2, y2), ocr_lines, i in zip(box_meta, ocr_results, range(len(box_meta))):
+            score = scores[0, i].item()
+            label = int(labels[0, i].item())
+            if score < 0.4:
                 continue
 
-            # 2) Run optimized inference
-            output, inference_time = optimized_inference(engine, img, device)
+            row = {
+                "class_name": COCO_CLASSES[label][1] if 0 <= label < len(COCO_CLASSES) else "unknown",
+                "confidence": round(score, 3),
+                "box": [x1, y1, x2, y2],
+            }
+            if ocr_lines:
+                row["ocr_results"] = [
+                    {"ocr_text": txt, "ocr_conf": round(conf, 3)}
+                    for line in ocr_lines if line
+                    for _, (txt, conf) in line
+                ]
+            panel_rows.append(row)
 
-            # Extract results
-            labels, boxes, scores = output["labels"], output["boxes"], output["scores"]
+        pil_img = draw([Image.fromarray(cv2.cvtColor(img, cv2.COLOR_BGR2RGB))], labels, boxes, scores)
+        data = {
+            "frame_id": frame_id,
+            "img": img,  # for debugging or later use
+            "pil_img": pil_img[0],
+            "panel_rows": panel_rows,
+        }
 
-            # 3) Process results as needed
-            # ... (draw boxes, update latest_jpeg, etc.)
-
-            print(f"[Frame {frame_id:.3f}] timings:")
-            print(f"  ▸ Optimized Inference: {inference_time:.1f} ms")
-
-        finally:
-            frame_queue.task_done()
+        output_queue.put(data)
+        frame_id += 1
