@@ -52,13 +52,25 @@ def health():
     return {"status": "ok"}
 
 
-@app.get("/activeMonitoring")
+@app.get("/start")
 def start():
     # Wait for the API to be up before sending /start_stream
     # Now tell the Pi to start sending frames
     PI_URL = "http://192.168.0.92:9000"
     try:
         resp = requests.post(f"{PI_URL}/start_stream", timeout=2)
+        print("Pi response:", resp.text)
+    except Exception as e:
+        print("Failed to contact Pi:", e)
+
+
+@app.get("/stop")
+def start():
+    # Wait for the API to be up before sending /start_stream
+    # Now tell the Pi to start sending frames
+    PI_URL = "http://192.168.0.92:9000"
+    try:
+        resp = requests.post(f"{PI_URL}/stop_stream", timeout=2)
         print("Pi response:", resp.text)
     except Exception as e:
         print("Failed to contact Pi:", e)
