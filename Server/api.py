@@ -2,9 +2,23 @@ import asyncio
 
 import requests
 from fastapi import FastAPI, Request
+from fastapi.middleware.cors import CORSMiddleware
 from starlette.responses import StreamingResponse
 
+# Allow your frontend origin, or use ["*"] for any (dev only!)
+origins = [
+    "http://localhost:5173",
+    # add more origins if needed, e.g. "http://127.0.0.1:5173"
+]
+
 app = FastAPI()
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=origins,  # or ["*"] for all
+    allow_credentials=True,
+    allow_methods=["*"],  # allow all HTTP methods
+    allow_headers=["*"],  # allow all headers
+)
 
 
 def inject_queues(frame_queue, mjpeg_queue):
@@ -52,7 +66,7 @@ def health():
     return {"status": "ok"}
 
 
-@app.get("/start")
+@app.post("/start")
 def start():
     # Wait for the API to be up before sending /start_stream
     # Now tell the Pi to start sending frames
@@ -64,7 +78,7 @@ def start():
         print("Failed to contact Pi:", e)
 
 
-@app.get("/stop")
+@app.post("/stop")
 def start():
     # Wait for the API to be up before sending /start_stream
     # Now tell the Pi to start sending frames
