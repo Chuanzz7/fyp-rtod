@@ -4,7 +4,6 @@ import threading
 import time
 from multiprocessing import Process
 
-import requests
 import uvicorn
 
 from Server import api
@@ -14,7 +13,7 @@ os.environ["KMP_DUPLICATE_LIB_OK"] = "TRUE"
 
 
 def run_uvicorn():
-    uvicorn.run("Server.api:app", host="0.0.0.0", port=8000, reload=False)
+    uvicorn.run("Server.api:app", host="0.0.0.0", port=8000, reload=False, log_level="warning")
 
 
 if __name__ == "__main__":
@@ -37,8 +36,6 @@ if __name__ == "__main__":
     # Start Uvicorn in a thread so the main process isn't blocked
     uvicorn_thread = threading.Thread(target=run_uvicorn, daemon=True)
     uvicorn_thread.start()
-
-
 
     print("Server boot complete, inference ready and standing by for frames.")
 

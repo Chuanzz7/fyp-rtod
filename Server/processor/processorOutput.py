@@ -1,8 +1,9 @@
 import io
 import queue
+import time
 from multiprocessing import Queue
 
-from PIL import ImageDraw
+from PIL import ImageDraw, ImageFont
 
 from Server.helper import videoHelper
 from Server.helper.dataClass import COCO_CLASSES
@@ -17,6 +18,12 @@ ASSIGNED_REGIONS = [
 
 
 def process_output_main(input_queue: Queue, mjpeg_frame_queue: Queue):
+    last_time = time.time()
+    frame_count = 0
+    fps = 0
+
+    font = ImageFont.truetype("arial.ttf", 28)  # Choose size to taste
+
     while True:
         try:
             data = input_queue.get(timeout=1)
@@ -29,6 +36,21 @@ def process_output_main(input_queue: Queue, mjpeg_frame_queue: Queue):
         )
 
         pil_img_with_boxes = draw_assigned_regions_on_frame(data["pil_img"], ASSIGNED_REGIONS)
+
+        # === FPS Calculation ===
+        frame_count += 1
+        now = time.time()
+        elapsed = now - last_time
+        if elapsed >= 1.0:
+            fps = frame_count / elapsed
+            frame_count = 0
+            last_time = now
+
+        # === Overlay FPS on the image ===
+        draw = ImageDraw.Draw(pil_img_with_boxes)
+        text = f"FPS: {fps:.2f}"
+        draw.rectangle((10, 10, 140, 45), fill=(0, 0, 0, 127))  # semi-transparent background
+        draw.text((15, 15), text, fill=(255, 255, 0), font=font)  # yellow text
 
         # Draw detection panel with placement info
         panel = videoHelper.build_detection_panel(

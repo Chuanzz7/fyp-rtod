@@ -126,7 +126,7 @@ def processor_tensor_main(frame_input_queue: Queue, output_queue: Queue):
             continue
 
         output, inference_time = optimized_inference(ENGINE, _input_tensor, _orig_size, img)
-        print(f"  ▸ Optimized Inference: {inference_time:.1f} ms")
+        # print(f"  ▸ Optimized Inference: {inference_time:.1f} ms")
         labels, boxes, scores = output["labels"], output["boxes"], output["scores"]
 
         cropped_images, box_meta, panel_rows = [], [], []
@@ -145,7 +145,7 @@ def processor_tensor_main(frame_input_queue: Queue, output_queue: Queue):
         t_ocr_start = time.perf_counter()
         ocr_results = [ocr.ocr(crop, det=True, cls=True) for crop in cropped_images]
         t_ocr_end = time.perf_counter()
-        print(f"OCR (batch): {(t_ocr_end - t_ocr_start) * 1000:.1f} ms")
+        # print(f"OCR (batch): {(t_ocr_end - t_ocr_start) * 1000:.1f} ms")
 
         for (x1, y1, x2, y2), ocr_lines, i in zip(box_meta, ocr_results, range(len(box_meta))):
             score = scores[0, i].item()
