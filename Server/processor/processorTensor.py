@@ -132,7 +132,7 @@ def processor_tensor_main(frame_input_queue: Queue, output_queue: Queue):
         cropped_images, box_meta, panel_rows = [], [], []
         for i in range(boxes.shape[1]):  # boxes: [1, N, 4]
             score = scores[0, i].item()
-            if score < 0.4:
+            if score < 0.8:
                 continue
             x1, y1, x2, y2 = [int(boxes[0, i, j].item()) for j in range(4)]
             crop = img[y1:y2, x1:x2]
@@ -166,10 +166,10 @@ def processor_tensor_main(frame_input_queue: Queue, output_queue: Queue):
                 ]
             panel_rows.append(row)
 
-        pil_img = draw([Image.fromarray(cv2.cvtColor(img, cv2.COLOR_BGR2RGB))], labels, boxes, scores)
+        pil_img = draw([Image.fromarray(cv2.cvtColor(img, cv2.COLOR_BGR2RGB))], labels, boxes, scores, 0.8)
         data = {
             "frame_id": frame_id,
-            "img": img,  # for debugging or later use
+            "img": img,
             "pil_img": pil_img[0],
             "panel_rows": panel_rows,
         }
