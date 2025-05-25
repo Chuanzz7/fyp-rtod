@@ -1,0 +1,8 @@
+/DFINE/output/
+/DFINE/weight/
+/DFINE/*.pyc
+/DFINE/wandb/
+/DFINE/*.pth
+/DFINE/*.onnx
+/Server/results/
+/DFINE/model/
