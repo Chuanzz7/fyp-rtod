@@ -7,6 +7,7 @@ import cv2
 import numpy as np
 import torch
 from PIL import Image
+from deep_sort_realtime.deepsort_tracker import DeepSort
 from paddleocr import PaddleOCR
 
 from DFINE.tools.inference.trt_inf import TRTInference, draw
@@ -111,35 +112,74 @@ def processor_tensor_main(frame_input_queue: Queue, output_queue: Queue):
     initialize_buffers()
     ENGINE = TRTInference(TENSOR_MODEL)
     ocr = PaddleOCR(use_angle_cls=True, lang="en", show_log=False)
+
+    # Initialize DeepSort (tune as needed)
+    tracker = DeepSort(max_age=30, n_init=2, nms_max_overlap=1.0)
+    object_cache = {}
+    frame_id = 0
+
     print("Inference & OCR buffers ready, waiting for frames...")
 
     frame_id = 0
     while True:
         try:
-            frame = frame_input_queue.get(timeout=1)
+            frame_bytes = frame_input_queue.get(timeout=1)
         except queue.Empty:
             continue
 
-        img = cv2.imdecode(np.frombuffer(frame, np.uint8), cv2.IMREAD_COLOR)
-        if img is None:
-            print("JPEG decode failed – skipping frame")
-            continue
+        # Convert bytes to numpy array of uint8
+        np_arr = np.frombuffer(frame_bytes, dtype=np.uint8)
+
+        # Decode JPEG to BGR image
+        imgRaw = cv2.imdecode(np_arr, cv2.IMREAD_COLOR)  # img is now H x W x 3 in BGR
+
+        if imgRaw is None:
+            raise ValueError("Failed to decode JPEG image")
+
+        # If you want RGB:
+        img = cv2.cvtColor(imgRaw, cv2.COLOR_BGR2RGB)
 
         output, inference_time = optimized_inference(ENGINE, _input_tensor, _orig_size, img)
         # print(f"  ▸ Optimized Inference: {inference_time:.1f} ms")
         labels, boxes, scores = output["labels"], output["boxes"], output["scores"]
 
-        cropped_images, box_meta, panel_rows = [], [], []
-        for i in range(boxes.shape[1]):  # boxes: [1, N, 4]
+        # --------- Prepare detections for DeepSort ---------
+        detections = []
+        for i in range(boxes.shape[1]):
             score = scores[0, i].item()
             if score < 0.8:
                 continue
             x1, y1, x2, y2 = [int(boxes[0, i, j].item()) for j in range(4)]
+            label = int(labels[0, i].item())
+            class_name = COCO_CLASSES[label][1] if 0 <= label < len(COCO_CLASSES) else "unknown"
+            detections.append(([x1, y1, x2, y2], score, class_name))
+
+        tracks = tracker.update_tracks(detections, frame=img)
+
+        cropped_images, box_meta, panel_rows = [], [], []
+        # --------- Extract crops & cache per DeepSort track ---------
+        for track in tracks:
+            if not track.is_confirmed():
+                continue
+
+            track_id = track.track_id
+            ltrb = track.to_ltrb()
+            x1, y1, x2, y2 = map(int, ltrb)
+            class_name = track.det_class  # Correct attribute for class
+
             crop = img[y1:y2, x1:x2]
             if crop.size == 0:
                 continue
+
+            # Save detection confidence score from track
+            # track.det_conf is the detection confidence in deep_sort_realtime
+            score = getattr(track, 'det_conf', None)
+            if score is None:
+                score = 1.0  # fallback if confidence not available
+
             cropped_images.append(crop)
-            box_meta.append((x1, y1, x2, y2))
+            box_meta.append((x1, y1, x2, y2, track_id, class_name, score))
+        # -----------------------------------------------------------
 
         # OCR each crop
         t_ocr_start = time.perf_counter()
@@ -147,24 +187,48 @@ def processor_tensor_main(frame_input_queue: Queue, output_queue: Queue):
         t_ocr_end = time.perf_counter()
         # print(f"OCR (batch): {(t_ocr_end - t_ocr_start) * 1000:.1f} ms")
 
-        for (x1, y1, x2, y2), ocr_lines, i in zip(box_meta, ocr_results, range(len(box_meta))):
-            score = scores[0, i].item()
-            label = int(labels[0, i].item())
-            if score < 0.4:
-                continue
+        for (x1, y1, x2, y2, track_id, class_name, score), ocr_lines in zip(box_meta, ocr_results):
+            # Store/update in RAM cache
+            if track_id not in object_cache:
+                object_cache[track_id] = {
+                    "history": [],
+                    "first_seen": frame_id,
+                    "ocr_results": [],
+                    "last_seen": frame_id,
+                    "class_name": class_name,
+                }
+            object_cache[track_id]["history"].append((x1, y1, x2, y2, frame_id))
+            object_cache[track_id]["last_seen"] = frame_id
+            object_cache[track_id]["class_name"] = class_name
+
+            # Filter OCR results by confidence threshold, e.g. 0.5
+            conf_threshold = 0.5
+            filtered_ocr = []
+            if ocr_lines:
+                for line in ocr_lines:
+                    if line:
+                        for _, (txt, conf) in line:
+                            if conf >= conf_threshold:
+                                filtered_ocr.append({"ocr_text": txt, "ocr_conf": round(conf, 3)})
+
+            # Only update cache if currently empty to avoid overwriting good OCR
+            if filtered_ocr and not object_cache[track_id]["ocr_results"]:
+                object_cache[track_id]["ocr_results"] = filtered_ocr
 
             row = {
-                "class_name": COCO_CLASSES[label][1] if 0 <= label < len(COCO_CLASSES) else "unknown",
+                "object_id": track_id,
+                "class_name": class_name,
                 "confidence": round(score, 3),
                 "box": [x1, y1, x2, y2],
+                "ocr_results": object_cache[track_id]["ocr_results"]
             }
-            if ocr_lines:
-                row["ocr_results"] = [
-                    {"ocr_text": txt, "ocr_conf": round(conf, 3)}
-                    for line in ocr_lines if line
-                    for _, (txt, conf) in line
-                ]
             panel_rows.append(row)
+
+        # Optional: Clean old tracks from cache
+        max_disappear = 50
+        remove_ids = [oid for oid, data in object_cache.items() if frame_id - data["last_seen"] > max_disappear]
+        for oid in remove_ids:
+            del object_cache[oid]
 
         pil_img = draw([Image.fromarray(cv2.cvtColor(img, cv2.COLOR_BGR2RGB))], labels, boxes, scores, 0.8)
         data = {

@@ -1,6 +1,8 @@
 import asyncio
 import time
 
+import cv2
+import numpy as np
 import requests
 from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
@@ -28,12 +30,12 @@ def inject_queues(frame_queue, mjpeg_queue):
     app.state.frame_input_queue = frame_queue
     app.state.mjpeg_frame_queue = mjpeg_queue
 
-async def qps_logger():
+async def qps_logger(interval=10):
     while True:
-        await asyncio.sleep(1)
+        await asyncio.sleep(interval)
         count = app.state.upload_counter
         app.state.upload_counter = 0
-        print(f"[UPLOAD_FRAME QPS] {count} requests/second")
+        print(f"[UPLOAD_FRAME QPS] {count} requests in last {interval} seconds | Avg: {count/interval:.2f} rps")
 
 @app.on_event("startup")
 async def startup_event():
@@ -42,6 +44,7 @@ async def startup_event():
 @app.post("/upload_frame")
 async def upload_frame(request: Request):
     app.state.upload_counter += 1  # <--- increment counter
+    # Get raw bytes
     frame_bytes = await request.body()
     try:
         app.state.frame_input_queue.put_nowait(frame_bytes)

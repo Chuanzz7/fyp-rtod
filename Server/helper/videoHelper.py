@@ -1,5 +1,20 @@
 from PIL import Image, ImageDraw, ImageFont
 
+PANEL_W = 350  # Set as appropriate
+PADDING_X = 18
+PADDING_Y = 16
+LINE_SPACING = 8
+DETECTION_GAP = 16
+PRIMARY_FONT = ImageFont.truetype("arial.ttf", 22)  # Adjust font path and size
+SECONDARY_FONT = ImageFont.truetype("arial.ttf", 16)  # For OCR text
+
+BG_COLOR = (15, 15, 15)
+TEXT_COLOR = (255, 255, 255)
+OCR_COLOR = (140, 210, 255)
+HIGH_CONF_COLOR = (110, 255, 110)
+MID_CONF_COLOR = (255, 210, 80)
+LOW_CONF_COLOR = (255, 100, 100)
+
 
 def build_detection_panel(results, height, region_statuses=None):
     """
@@ -7,20 +22,6 @@ def build_detection_panel(results, height, region_statuses=None):
     • Class name and detector confidence (large font)
     • Optional OCR text and its confidence (smaller font, colored)
     """
-    PANEL_W = 350  # Set as appropriate
-    PADDING_X = 18
-    PADDING_Y = 16
-    LINE_SPACING = 8
-    DETECTION_GAP = 16
-    PRIMARY_FONT = ImageFont.truetype("arial.ttf", 22)  # Adjust font path and size
-    SECONDARY_FONT = ImageFont.truetype("arial.ttf", 16)  # For OCR text
-
-    BG_COLOR = (15, 15, 15)
-    TEXT_COLOR = (255, 255, 255)
-    OCR_COLOR = (140, 210, 255)
-    HIGH_CONF_COLOR = (110, 255, 110)
-    MID_CONF_COLOR = (255, 210, 80)
-    LOW_CONF_COLOR = (255, 100, 100)
 
     panel = Image.new("RGB", (PANEL_W, height), BG_COLOR)
     draw = ImageDraw.Draw(panel)
@@ -36,8 +37,9 @@ def build_detection_panel(results, height, region_statuses=None):
         else:
             conf_color = LOW_CONF_COLOR
 
-        # ── line-1 : Detector output ──
-        label = f"{r['class_name']:<12}  {conf * 100:5.1f}%"
+        # ── line-1 : Detector output with Track ID ──
+        track_id = r.get('object_id', 'N/A')
+        label = f"ID:{track_id:<3} {r['class_name']:<12} {conf * 100:5.1f}%"
         draw.text((PADDING_X, y), label, fill=conf_color, font=PRIMARY_FONT)
         y += PRIMARY_FONT.size + LINE_SPACING
 
@@ -51,7 +53,7 @@ def build_detection_panel(results, height, region_statuses=None):
             else:
                 conf_color = (255, 210, 80)  # yellow
 
-            label = f"{r['class_name']:<12}  {status}"
+            label = f"{status}"
             draw.text((PADDING_X, y), label, fill=conf_color, font=PRIMARY_FONT)
             y += PRIMARY_FONT.size + LINE_SPACING
 
@@ -76,6 +78,7 @@ def build_detection_panel(results, height, region_statuses=None):
             break
 
     return panel
+
 
 def side_by_side(left: Image.Image, right: Image.Image) -> Image.Image:
     """Horizontally concat two PIL images of identical height."""
