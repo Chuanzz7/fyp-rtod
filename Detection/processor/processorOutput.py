@@ -5,8 +5,8 @@ from multiprocessing import Queue
 
 from PIL import ImageDraw, ImageFont
 
-from Server.helper import videoHelper
-from Server.helper.dataClass import COCO_CLASSES
+from Detection.helper import videoHelper
+from Detection.helper.dataClass import COCO_CLASSES
 
 ASSIGNED_REGIONS = [
     {

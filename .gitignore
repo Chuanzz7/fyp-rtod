@@ -4,5 +4,7 @@
 /DFINE/wandb/
 /DFINE/*.pth
 /DFINE/*.onnx
-/Server/results/
+/Detection/results/
 /DFINE/model/
+
+*.iml
