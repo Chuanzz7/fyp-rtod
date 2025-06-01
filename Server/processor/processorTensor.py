@@ -111,7 +111,7 @@ def optimized_inference(engine, _input_tensor, _orig_size, img, ):
 def processor_tensor_main(frame_input_queue: Queue, output_queue: Queue):
     initialize_buffers()
     ENGINE = TRTInference(TENSOR_MODEL)
-    ocr = PaddleOCR(use_angle_cls=True, lang="en", show_log=False)
+    ocr = PaddleOCR(enable_hpi=True, use_gpu=True, use_angle_cls=True, lang="en", show_log=False)
 
     # Initialize DeepSort (tune as needed)
     tracker = DeepSort(max_age=30, n_init=2, nms_max_overlap=1.0)
@@ -128,6 +128,7 @@ def processor_tensor_main(frame_input_queue: Queue, output_queue: Queue):
             continue
 
         # Convert bytes to numpy array of uint8
+        processor_start = time.perf_counter()
         np_arr = np.frombuffer(frame_bytes, dtype=np.uint8)
 
         # Decode JPEG to BGR image
@@ -140,7 +141,7 @@ def processor_tensor_main(frame_input_queue: Queue, output_queue: Queue):
         img = cv2.cvtColor(imgRaw, cv2.COLOR_BGR2RGB)
 
         output, inference_time = optimized_inference(ENGINE, _input_tensor, _orig_size, img)
-        # print(f"  ▸ Optimized Inference: {inference_time:.1f} ms")
+        print(f"  ▸ Optimized Inference: {inference_time:.1f} ms")
         labels, boxes, scores = output["labels"], output["boxes"], output["scores"]
 
         # --------- Prepare detections for DeepSort ---------
@@ -185,8 +186,9 @@ def processor_tensor_main(frame_input_queue: Queue, output_queue: Queue):
         t_ocr_start = time.perf_counter()
         ocr_results = [ocr.ocr(crop, det=True, cls=True) for crop in cropped_images]
         t_ocr_end = time.perf_counter()
-        # print(f"OCR (batch): {(t_ocr_end - t_ocr_start) * 1000:.1f} ms")
+        print(f"  ▸ OCR (batch): {(t_ocr_end - t_ocr_start) * 1000:.1f} ms")
 
+        sort_start = time.perf_counter()
         for (x1, y1, x2, y2, track_id, class_name, score), ocr_lines in zip(box_meta, ocr_results):
             # Store/update in RAM cache
             if track_id not in object_cache:
@@ -229,8 +231,14 @@ def processor_tensor_main(frame_input_queue: Queue, output_queue: Queue):
         remove_ids = [oid for oid, data in object_cache.items() if frame_id - data["last_seen"] > max_disappear]
         for oid in remove_ids:
             del object_cache[oid]
+        sort_end = time.perf_counter()
+        print(f"  ▸ SORT: {(sort_end - sort_start) * 1000:.1f} ms")
 
+        draw_start = time.perf_counter()
         pil_img = draw([Image.fromarray(cv2.cvtColor(img, cv2.COLOR_BGR2RGB))], labels, boxes, scores, 0.8)
+        draw_end = time.perf_counter()
+        print(f"  ▸ Draw: {(draw_end - draw_start) * 1000:.1f} ms")
+
         data = {
             "frame_id": frame_id,
             "img": img,
@@ -238,5 +246,7 @@ def processor_tensor_main(frame_input_queue: Queue, output_queue: Queue):
             "panel_rows": panel_rows,
         }
 
+        processor_end = time.perf_counter()
+        print(f"Processor End: {(processor_end - processor_start) * 1000:.1f} ms")
         output_queue.put(data)
         frame_id += 1
