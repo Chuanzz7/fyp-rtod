@@ -1,12 +1,12 @@
 import asyncio
 import time
 
-import cv2
-import numpy as np
 import requests
-from fastapi import FastAPI, Request
+from fastapi import FastAPI, Request, UploadFile, File
 from fastapi.middleware.cors import CORSMiddleware
-from starlette.responses import StreamingResponse
+from starlette.responses import StreamingResponse, JSONResponse
+
+from Detection.processor.processorTensor import process_single_image
 
 # Allow your frontend origin, or use ["*"] for any (dev only!)
 origins = [
@@ -30,16 +30,19 @@ def inject_queues(frame_queue, mjpeg_queue):
     app.state.frame_input_queue = frame_queue
     app.state.mjpeg_frame_queue = mjpeg_queue
 
+
 async def qps_logger(interval=10):
     while True:
         await asyncio.sleep(interval)
         count = app.state.upload_counter
         app.state.upload_counter = 0
-        print(f"[UPLOAD_FRAME QPS] {count} requests in last {interval} seconds | Avg: {count/interval:.2f} rps")
+        print(f"[UPLOAD_FRAME QPS] {count} requests in last {interval} seconds | Avg: {count / interval:.2f} rps")
+
 
 @app.on_event("startup")
 async def startup_event():
     asyncio.create_task(qps_logger())
+
 
 @app.post("/upload_frame")
 async def upload_frame(request: Request):
@@ -51,6 +54,21 @@ async def upload_frame(request: Request):
     except Exception as e:
         return {"status": f"queue error: {e}"}
     return {"status": "frame received"}
+
+
+@app.post("/api/detect_item")
+async def upload_frame(image: UploadFile = File(...)):
+    try:
+        frame_bytes = await image.read()
+        result = process_single_image(
+            image_input=frame_bytes,
+            include_ocr=True,
+            detection_threshold=0.8,
+            ocr_threshold=0.5
+        )
+        return JSONResponse(content=result)
+    except Exception as e:
+        return JSONResponse(content={"status": f"queue error: {e}"})
 
 
 async def mjpeg_generator():

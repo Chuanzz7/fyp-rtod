@@ -62,15 +62,19 @@ def build_detection_panel(results, height, region_statuses=None):
         # ── line-3: OCR results (if available) ──
         if r.get("ocr_results"):
             for o in r["ocr_results"]:
-                ocr_text = o['ocr_text']
-                # Truncate with ellipsis
-                max_chars = 28
-                ocr_text = (ocr_text[:max_chars] + '…') if len(ocr_text) > max_chars else ocr_text
-                ocr_label = f"  ↳ {ocr_text} ({o['ocr_conf'] * 100:4.1f}%)"
-                draw.text((PADDING_X + 12, y), ocr_label, fill=OCR_COLOR, font=SECONDARY_FONT)
-                y += SECONDARY_FONT.size + LINE_SPACING // 2
-                if y > height - PADDING_Y - 20:
-                    break
+                # Safe key access with fallbacks
+                ocr_text = o.get('ocr_text', o.get('text', ''))
+                ocr_conf = o.get('ocr_conf', o.get('ocr_confidence', o.get('confidence', 0)))
+
+                if ocr_text:  # Only display if we have text
+                    # Truncate with ellipsis
+                    max_chars = 28
+                    ocr_text = (ocr_text[:max_chars] + '…') if len(ocr_text) > max_chars else ocr_text
+                    ocr_label = f"  -> {ocr_text} ({ocr_conf * 100:4.1f}%)"
+                    draw.text((PADDING_X + 12, y), ocr_label, fill=OCR_COLOR, font=SECONDARY_FONT)
+                    y += SECONDARY_FONT.size + LINE_SPACING // 2
+                    if y > height - PADDING_Y - 20:
+                        break
 
         # Gap before next detection
         y += DETECTION_GAP

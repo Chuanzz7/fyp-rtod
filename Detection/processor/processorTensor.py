@@ -1,8 +1,9 @@
+import base64
 import queue
 import time
 from multiprocessing import Queue
 from pathlib import Path
-from typing import List, Tuple, Dict, Any, Optional
+from typing import List, Tuple, Dict, Any, Optional, Union
 
 import cv2
 import numpy as np
@@ -127,6 +128,31 @@ class DetectionProcessor:
 
         return detections
 
+    @staticmethod
+    def process_detections_for_api(output: Dict[str, torch.Tensor],
+                                   confidence_threshold: float = DETECTION_CONFIDENCE_THRESHOLD) -> List[Dict]:
+        """Convert model output to API-friendly format"""
+        labels, boxes, scores = output["labels"], output["boxes"], output["scores"]
+        detections = []
+
+        for i in range(boxes.shape[1]):
+            score = scores[0, i].item()
+            if score < confidence_threshold:
+                continue
+
+            x1, y1, x2, y2 = [int(boxes[0, i, j].item()) for j in range(4)]
+            label = int(labels[0, i].item())
+            class_name = COCO_CLASSES[label][1] if 0 <= label < len(COCO_CLASSES) else "unknown"
+
+            detections.append({
+                "bbox": [x1, y1, x2, y2],
+                "confidence": score,
+                "class_name": class_name,
+                "class_id": label
+            })
+
+        return detections
+
 
 class TrackingManager:
     """Manages object tracking with DeepSort"""
@@ -159,28 +185,117 @@ class TrackingManager:
 
 
 class OCRProcessor:
-    """Handles OCR processing with caching"""
+    """Optimized OCR processor for product text detection (bottles, packages, etc.)"""
 
     def __init__(self):
         self.ocr = PaddleOCR(
-            enable_hpi=True,
-            use_gpu=True,
-            use_angle_cls=True,
-            lang="en",
-            show_log=False
+            # Core model settings
+            det_model_dir=None,  # Use default v5 detection model
+            rec_model_dir=None,  # Use default v5 recognition model
+            cls_model_dir=None,  # Use default v5 classification model
+
+            # Language and processing
+            lang="en",  # Set to specific language for better accuracy
+            use_angle_cls=True,  # Essential for rotated text on curved bottles
+
+            # Performance settings
+            use_gpu=True,  # GPU acceleration
+            enable_mkldnn=True,  # CPU optimization when GPU unavailable
+            cpu_threads=4,  # Optimize for your CPU
+
+            # Detection parameters - crucial for small/curved text
+            det_algorithm="DB",  # Only supported algorithm in v5
+            det_limit_type="max",  # Use 'max' for high-res product images
+            det_limit_side_len=1536,  # Higher resolution for small text (default: 960)
+            det_db_thresh=0.3,  # Lower threshold for faint text (default: 0.3)
+            det_db_box_thresh=0.5,  # Box filtering threshold (default: 0.6)
+            det_db_unclip_ratio=1.6,  # Expand detection boxes slightly (default: 1.5)
+            det_db_score_mode="fast",  # Use 'fast' for better compatibility
+
+            # Recognition parameters - use default algorithms
+            # rec_algorithm is auto-selected in v5, don't specify explicitly
+            rec_image_shape="3, 48, 320",  # Optimized for product text
+            rec_batch_num=6,  # Batch processing
+
+            # Quality and preprocessing
+            use_dilation=True,  # Helps with thin text
+            det_east_score_thresh=0.8,  # For EAST algorithm if used
+            det_east_cover_thresh=0.1,
+            det_east_nms_thresh=0.2,
+
+            # Output settings
+            show_log=False,  # Set to True for debugging
+            save_crop_res=False,  # Set to True if you want to save cropped regions
+            crop_res_save_dir="./output",  # Directory for saved crops
+
+            # Advanced settings for curved/distorted text (bottles)
+            use_space_char=True,  # Preserve spaces in text
+            drop_score=0.3,  # Lower score threshold for keeping results (default: 0.5)
         )
 
     def process_crops(self, crops: List[np.ndarray]) -> List:
-        """Process multiple image crops with OCR"""
+        """Process multiple image crops with OCR - optimized for products"""
         if not crops:
             return []
 
         t_start = time.perf_counter()
-        results = [self.ocr.ocr(crop, det=True, cls=True) for crop in crops]
-        t_end = time.perf_counter()
 
+        # Process with optimized parameters for product text
+        results = []
+        for crop in crops:
+            # Preprocess crop for better OCR
+            processed_crop = self._preprocess_crop(crop)
+            result = self.ocr.ocr(
+                processed_crop,
+                det=True,
+                cls=True,
+                # Additional parameters for better product text detection
+            )
+            results.append(result)
+
+        t_end = time.perf_counter()
         print(f"  ▸ OCR (batch): {(t_end - t_start) * 1000:.1f} ms")
         return results
+
+    def _preprocess_crop(self, crop: np.ndarray) -> np.ndarray:
+        """Preprocess image crop for better OCR on products"""
+        import cv2
+
+        # Convert to grayscale if needed
+        if len(crop.shape) == 3:
+            gray = cv2.cvtColor(crop, cv2.COLOR_BGR2GRAY)
+        else:
+            gray = crop.copy()
+
+        # Enhance contrast for faint text
+        clahe = cv2.createCLAHE(clipLimit=2.0, tileGridSize=(8, 8))
+        enhanced = clahe.apply(gray)
+
+        # Convert back to BGR for PaddleOCR
+        if len(crop.shape) == 3:
+            return cv2.cvtColor(enhanced, cv2.COLOR_GRAY2BGR)
+        else:
+            return cv2.cvtColor(enhanced, cv2.COLOR_GRAY2BGR)
+
+    def process_single_crop(self, crop: np.ndarray) -> List[Dict]:
+        """Process single image crop with OCR - optimized for product text"""
+        if crop.size == 0:
+            return []
+
+        t_start = time.perf_counter()
+
+        # Preprocess for better results
+        processed_crop = self._preprocess_crop(crop)
+
+        result = self.ocr.ocr(
+            processed_crop,
+            det=True,
+            cls=True,
+        )
+
+        t_end = time.perf_counter()
+        print(f"  ▸ OCR processing: {(t_end - t_start) * 1000:.1f} ms")
+        return self.filter_ocr_results(result)
 
     @staticmethod
     def filter_ocr_results(ocr_lines: List,
@@ -194,8 +309,8 @@ class OCRProcessor:
                     for _, (txt, conf) in line:
                         if conf >= confidence_threshold:
                             filtered_ocr.append({
-                                "ocr_text": txt,
-                                "ocr_conf": round(conf, 3)
+                                "text": txt,
+                                "confidence": round(conf, 3)
                             })
 
         return filtered_ocr
@@ -304,6 +419,148 @@ class ResultAssembler:
         return panel_rows
 
 
+class SingleImageProcessor:
+    """Handles single image processing for API calls"""
+
+    def __init__(self):
+        """Initialize the processor with required components"""
+        # Initialize GPU buffers if not already done
+        global _input_tensor
+        if _input_tensor is None:
+            GPUBufferManager.initialize_buffers()
+
+        # Initialize components
+        self.inference_engine = InferenceEngine(TENSOR_MODEL)
+        self.ocr_processor = OCRProcessor()
+
+        print("Single image processor initialized")
+
+    def process_image(self,
+                      image_input: Union[str, bytes, np.ndarray, Image.Image],
+                      include_ocr: bool = True,
+                      detection_threshold: float = DETECTION_CONFIDENCE_THRESHOLD,
+                      ocr_threshold: float = OCR_CONFIDENCE_THRESHOLD) -> Dict[str, Any]:
+        """
+        Process a single image and return detection and OCR results
+
+        Args:
+            image_input: Input image (file path, base64 string, bytes, numpy array, or PIL Image)
+            include_ocr: Whether to perform OCR on detected objects
+            detection_threshold: Confidence threshold for object detection
+            ocr_threshold: Confidence threshold for OCR
+
+        Returns:
+            Dictionary containing detection results and OCR information
+        """
+        processor_start = time.perf_counter()
+
+        # Convert input to numpy array
+        img = self._prepare_image(image_input)
+
+        # Run inference
+        output, inference_time = self.inference_engine.run_inference(img)
+        print(f"  ▸ Inference: {inference_time:.1f} ms")
+
+        # Process detections for API format
+        detections = DetectionProcessor.process_detections_for_api(output, detection_threshold)
+
+        # Add OCR results if requested
+        if include_ocr:
+            ocr_start = time.perf_counter()
+            for detection in detections:
+                x1, y1, x2, y2 = detection["bbox"]
+                crop = img[y1:y2, x1:x2]
+
+                if crop.size > 0:
+                    ocr_results = self.ocr_processor.process_single_crop(crop)
+                    detection["ocr_results"] = ocr_results
+                else:
+                    detection["ocr_results"] = []
+
+            ocr_end = time.perf_counter()
+            print(f"  ▸ Total OCR: {(ocr_end - ocr_start) * 1000:.1f} ms")
+        else:
+            for detection in detections:
+                detection["ocr_results"] = []
+
+        processor_end = time.perf_counter()
+        total_time = (processor_end - processor_start) * 1000
+
+        # Prepare response
+        response = {
+            "status": "success",
+            "processing_time_ms": round(total_time, 1),
+            "inference_time_ms": round(inference_time, 1),
+            "image_dimensions": {
+                "width": img.shape[1],
+                "height": img.shape[0]
+            },
+            "detections_count": len(detections),
+            "detections": detections,
+            "settings": {
+                "detection_threshold": detection_threshold,
+                "ocr_threshold": ocr_threshold,
+                "ocr_enabled": include_ocr
+            }
+        }
+
+        print(f"Total processing: {total_time:.1f} ms")
+        return response
+
+    def _prepare_image(self, image_input: Union[str, bytes, np.ndarray, Image.Image]) -> np.ndarray:
+        """Convert various image input formats to numpy array"""
+
+        if isinstance(image_input, str):
+            # Handle file path or base64 string
+            if image_input.startswith('data:image') or len(image_input) > 500:
+                # Assume base64 string
+                if image_input.startswith('data:image'):
+                    # Remove data URL prefix
+                    image_input = image_input.split(',')[1]
+
+                image_bytes = base64.b64decode(image_input)
+                img_array = np.frombuffer(image_bytes, dtype=np.uint8)
+                img = cv2.imdecode(img_array, cv2.IMREAD_COLOR)
+
+                if img is None:
+                    raise ValueError("Failed to decode base64 image")
+
+                return cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
+            else:
+                # Assume file path
+                img = cv2.imread(image_input)
+                if img is None:
+                    raise ValueError(f"Failed to load image from path: {image_input}")
+                return cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
+
+        elif isinstance(image_input, bytes):
+            # Handle raw bytes
+            img_array = np.frombuffer(image_input, dtype=np.uint8)
+            img = cv2.imdecode(img_array, cv2.IMREAD_COLOR)
+
+            if img is None:
+                raise ValueError("Failed to decode image bytes")
+
+            return cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
+
+        elif isinstance(image_input, np.ndarray):
+            # Handle numpy array
+            if len(image_input.shape) == 3 and image_input.shape[2] == 3:
+                # Assume RGB format
+                return image_input
+            else:
+                raise ValueError("Numpy array must be 3-channel RGB image")
+
+        elif isinstance(image_input, Image.Image):
+            # Handle PIL Image
+            if image_input.mode != 'RGB':
+                image_input = image_input.convert('RGB')
+            return np.array(image_input)
+
+        else:
+            raise ValueError(f"Unsupported image input type: {type(image_input)}")
+
+
 def decode_frame(frame_bytes: bytes) -> np.ndarray:
     """Decode JPEG frame bytes to OpenCV image"""
     np_arr = np.frombuffer(frame_bytes, dtype=np.uint8)
@@ -316,7 +573,7 @@ def decode_frame(frame_bytes: bytes) -> np.ndarray:
 
 
 def processor_tensor_main(frame_input_queue: Queue, output_queue: Queue):
-    """Main processing function with refactored components"""
+    """Main processing function with refactored components - ORIGINAL QUEUE-BASED PIPELINE"""
     # Initialize components
     GPUBufferManager.initialize_buffers()
     inference_engine = InferenceEngine(TENSOR_MODEL)
@@ -401,3 +658,29 @@ def processor_tensor_main(frame_input_queue: Queue, output_queue: Queue):
 
         output_queue.put(data)
         frame_id += 1
+
+
+# API-friendly functions
+def process_single_image(image_input: Union[str, bytes, np.ndarray, Image.Image],
+                         include_ocr: bool = True,
+                         detection_threshold: float = DETECTION_CONFIDENCE_THRESHOLD,
+                         ocr_threshold: float = OCR_CONFIDENCE_THRESHOLD) -> Dict[str, Any]:
+    """
+    Convenience function to process a single image - NEW API FUNCTIONALITY
+
+    Args:
+        image_input: Input image (file path, base64 string, bytes, numpy array, or PIL Image)
+        include_ocr: Whether to perform OCR on detected objects
+        detection_threshold: Confidence threshold for object detection
+        ocr_threshold: Confidence threshold for OCR
+
+    Returns:
+        Dictionary containing detection results and OCR information
+    """
+    processor = SingleImageProcessor()
+    return processor.process_image(
+        image_input=image_input,
+        include_ocr=include_ocr,
+        detection_threshold=detection_threshold,
+        ocr_threshold=ocr_threshold
+    )
