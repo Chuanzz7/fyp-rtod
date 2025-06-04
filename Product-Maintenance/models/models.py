@@ -14,8 +14,10 @@ class Product(Base):
     id: Mapped[int] = mapped_column(primary_key=True, index=True)
     name: Mapped[str] = mapped_column(String(128))
     description: Mapped[str] = mapped_column(String(1024), default="")
-    inventoryStatus: Mapped[str] = mapped_column(String(16), default="INSTOCK")
     category: Mapped[str] = mapped_column(String(64), default="")
     price: Mapped[float] = mapped_column(Float, default=0.0)
     quantity: Mapped[int] = mapped_column(Integer, default=0)
     image: Mapped[str] = mapped_column(String(256), default="product-placeholder.svg")
+    ocr: Mapped[str] = mapped_column(String(256), default="")
+    inventoryStatus: Mapped[str] = mapped_column(String(256), default="INSTOCK")
+

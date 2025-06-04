@@ -7,11 +7,12 @@ from pydantic import BaseModel
 class ProductBase(BaseModel):
     name: str
     description: Optional[str] = ""
-    inventoryStatus: Optional[str] = "INSTOCK"
     category: Optional[str] = ""
     price: Optional[float] = 0.0
     quantity: Optional[int] = 0
     image: Optional[str] = "product-placeholder.svg"
+    ocr: Optional[str] = ""
+    inventoryStatus: Optional[str] = ""
 
 
 class ProductCreate(ProductBase):

@@ -6,7 +6,7 @@ from fastapi import FastAPI, Request, UploadFile, File
 from fastapi.middleware.cors import CORSMiddleware
 from starlette.responses import StreamingResponse, JSONResponse
 
-from Detection.processor.processorTensor import process_single_image
+from Detection.processor.processorSingleImage import SingleImageProcessor
 
 # Allow your frontend origin, or use ["*"] for any (dev only!)
 origins = [
@@ -29,6 +29,7 @@ app.add_middleware(
 def inject_queues(frame_queue, mjpeg_queue):
     app.state.frame_input_queue = frame_queue
     app.state.mjpeg_frame_queue = mjpeg_queue
+    app.state.single_image_processor = SingleImageProcessor()
 
 
 async def qps_logger(interval=10):
@@ -60,7 +61,7 @@ async def upload_frame(request: Request):
 async def upload_frame(image: UploadFile = File(...)):
     try:
         frame_bytes = await image.read()
-        result = process_single_image(
+        result = app.state.single_image_processor.process_image(
             image_input=frame_bytes,
             include_ocr=True,
             detection_threshold=0.8,
