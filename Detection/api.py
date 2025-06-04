@@ -59,17 +59,14 @@ async def upload_frame(request: Request):
 
 @app.post("/api/detect_item")
 async def upload_frame(image: UploadFile = File(...)):
-    try:
-        frame_bytes = await image.read()
-        result = app.state.single_image_processor.process_image(
-            image_input=frame_bytes,
-            include_ocr=True,
-            detection_threshold=0.8,
-            ocr_threshold=0.5
-        )
-        return JSONResponse(content=result)
-    except Exception as e:
-        return JSONResponse(content={"status": f"queue error: {e}"})
+    frame_bytes = await image.read()
+    result = app.state.single_image_processor.process_image(
+        image_input=frame_bytes,
+        include_ocr=True,
+        detection_threshold=0.8,
+        ocr_threshold=0.5
+    )
+    return JSONResponse(content=result)
 
 
 async def mjpeg_generator():

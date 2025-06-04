@@ -3,6 +3,7 @@ from typing import Dict, Any, Union
 
 import numpy as np
 from PIL import Image
+from fastapi import HTTPException
 
 from Detection.helper.imageProcessingHelper import GPUBufferManager, InferenceEngine, OCRProcessor, DetectionProcessor, \
     ResultAssembler
@@ -82,7 +83,6 @@ class SingleImageProcessor:
 
         if len(detections) != 1:
             # Throw HTTP error or return error dict (FastAPI example below)
-            from fastapi import HTTPException
             raise HTTPException(status_code=400, detail=f"Expected exactly 1 detection, found {len(detections)}.")
 
         # Combine OCR texts from the single detection
