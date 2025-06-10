@@ -2,8 +2,9 @@
 from contextlib import asynccontextmanager
 
 import uvicorn
-from fastapi import FastAPI, HTTPException, Depends
+from fastapi import FastAPI, HTTPException, Depends, Body
 from fastapi.middleware.cors import CORSMiddleware
+from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.future import select
 
@@ -74,6 +75,29 @@ async def delete_product(product_id: int, db: AsyncSession = Depends(get_db)):
     await db.delete(db_product)
     await db.commit()
     return {"detail": "Product deleted"}
+
+
+@app.post("/api/product_lookup")
+async def fuzzy_product_lookup(
+        category: str = Body(...),
+        ocr: str = Body(...),
+        db: AsyncSession = Depends(get_db)
+):
+    query = text("""
+        SELECT *, similarity(ocr, :ocr) AS sim
+        FROM products
+        WHERE ocr % :ocr
+          AND category = :category
+        ORDER BY sim DESC
+        LIMIT 1
+    """)
+    result = await db.execute(query, {"ocr": ocr, "category": category})
+    row = result.first()
+    if not row:
+        raise HTTPException(status_code=404, detail="No similar product found")
+    product = dict(row._mapping)
+    product["confidence"] = float(product.pop("sim"))
+    return product
 
 
 if __name__ == "__main__":

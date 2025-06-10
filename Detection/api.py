@@ -10,7 +10,7 @@ from Detection.processor.processorSingleImage import SingleImageProcessor
 
 # Allow your frontend origin, or use ["*"] for any (dev only!)
 origins = [
-    "http://localhost:5173",
+    "*",
     # add more origins if needed, e.g. "http://127.0.0.1:5173"
 ]
 
@@ -24,7 +24,7 @@ app.add_middleware(
     allow_methods=["*"],  # allow all HTTP methods
     allow_headers=["*"],  # allow all headers
 )
-
+PI_URL = "http://192.168.0.93:9000"
 
 def inject_queues(frame_queue, mjpeg_queue):
     app.state.frame_input_queue = frame_queue
@@ -32,7 +32,7 @@ def inject_queues(frame_queue, mjpeg_queue):
     app.state.single_image_processor = SingleImageProcessor()
 
 
-async def qps_logger(interval=10):
+async def qps_logger(interval=60):
     while True:
         await asyncio.sleep(interval)
         count = app.state.upload_counter
@@ -103,7 +103,6 @@ def health():
 def start():
     # Wait for the API to be up before sending /start_stream
     # Now tell the Pi to start sending frames
-    PI_URL = "http://192.168.0.92:9000"
     try:
         resp = requests.post(f"{PI_URL}/start_stream", timeout=2)
         print("Pi response:", resp.text)
@@ -115,7 +114,6 @@ def start():
 def start():
     # Wait for the API to be up before sending /start_stream
     # Now tell the Pi to start sending frames
-    PI_URL = "http://192.168.0.92:9000"
     try:
         resp = requests.post(f"{PI_URL}/stop_stream", timeout=2)
         print("Pi response:", resp.text)

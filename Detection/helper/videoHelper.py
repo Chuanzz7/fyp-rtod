@@ -44,20 +44,17 @@ def build_detection_panel(results, height, region_statuses=None):
         y += PRIMARY_FONT.size + LINE_SPACING
 
         # ── line-2: Status results (if available) ──
-        for r in results:
-            status = r.get("region_status", "Unassigned")
-            if status == "Correct Region":
-                conf_color = (110, 255, 110)  # green
-            elif status.startswith("Wrong Region"):
-                conf_color = (255, 100, 100)  # red
-            else:
-                conf_color = (255, 210, 80)  # yellow
+        status = r.get("region_status", "Unassigned")
+        if status == "Correct Region":
+            status_color = (110, 255, 110)  # green
+        elif status.startswith("Wrong Region"):
+            status_color = (255, 100, 100)  # red
+        else:
+            status_color = (255, 210, 80)  # yellow
 
-            label = f"{status}"
-            draw.text((PADDING_X, y), label, fill=conf_color, font=PRIMARY_FONT)
-            y += PRIMARY_FONT.size + LINE_SPACING
-
-            # (OCR text as before)
+        label = f"{status}"
+        draw.text((PADDING_X, y), label, fill=status_color, font=PRIMARY_FONT)
+        y += PRIMARY_FONT.size + LINE_SPACING
 
         # ── line-3: OCR results (if available) ──
         if r.get("ocr_results"):

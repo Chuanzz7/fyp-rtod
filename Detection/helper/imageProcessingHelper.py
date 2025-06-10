@@ -236,7 +236,6 @@ class OCRProcessor:
         if not crops:
             return []
 
-        t_start = time.perf_counter()
 
         # Process with optimized parameters for product text
         results = []
@@ -251,8 +250,6 @@ class OCRProcessor:
             )
             results.append(result)
 
-        t_end = time.perf_counter()
-        print(f"  ▸ OCR (batch): {(t_end - t_start) * 1000:.1f} ms")
         return results
 
     def _preprocess_crop(self, crop: np.ndarray) -> np.ndarray:
@@ -329,11 +326,16 @@ class ObjectCache:
             self.cache[track_id] = {
                 "history": [],
                 "first_seen": frame_id,
+                "frames_tracked": 1,
                 "ocr_results": [],
                 "last_seen": frame_id,
                 "class_name": class_name,
-                "ocr_processed": False  # Flag to track if OCR has been done
+                "ocr_processed": False,  # Flag to track if OCR has been done
+                "api_called": False,
             }
+        else:
+            # Increment frames_tracked if seen in consecutive frames
+            self.cache[track_id]["frames_tracked"] += 1
 
         # Update tracking info
         self.cache[track_id]["history"].append((x1, y1, x2, y2, frame_id))
@@ -346,11 +348,15 @@ class ObjectCache:
             self.cache[track_id]["ocr_processed"] = True
             print(f"  ▸ OCR saved for track {track_id}: {len(ocr_results)} results")
 
-    def needs_ocr(self, track_id: int) -> bool:
-        """Check if OCR processing is needed for this track"""
+    def needs_ocr(self, track_id: int, min_frames: int = 2) -> bool:
+        """Check if OCR processing is needed for this track, and has survived min_frames"""
         if track_id not in self.cache:
-            return True
-        return not self.cache[track_id]["ocr_processed"]
+            return False  # Don't OCR unknown tracks!
+        tracked = self.cache[track_id]
+        return (
+                not tracked["ocr_processed"]
+                and tracked["frames_tracked"] >= min_frames
+        )
 
     def get_ocr_results(self, track_id: int) -> List[Dict]:
         """Get cached OCR results for a track"""
@@ -375,20 +381,16 @@ class CropExtractor:
     """Extracts image crops from tracked objects"""
 
     @staticmethod
-    def extract_crops(img: np.ndarray, track_info: List[Tuple],
-                      object_cache: ObjectCache) -> Tuple[List[np.ndarray], List[Tuple], List[int]]:
-        """Extract crops for objects that need OCR processing"""
+    def extract_crops(img: np.ndarray, track_info: List[Tuple], object_cache: ObjectCache, min_frames: int = 5):
         crops = []
         crop_metadata = []
         track_ids_needing_ocr = []
 
         for x1, y1, x2, y2, track_id, class_name, score in track_info:
-            crop = img[y1:y2, x1:x2]
-            if crop.size == 0:
-                continue
-
-            # Only add to OCR queue if OCR hasn't been processed yet
-            if object_cache.needs_ocr(track_id):
+            if object_cache.needs_ocr(track_id, min_frames=min_frames):
+                crop = img[y1:y2, x1:x2]
+                if crop.size == 0:
+                    continue
                 crops.append(crop)
                 crop_metadata.append((x1, y1, x2, y2, track_id, class_name, score))
                 track_ids_needing_ocr.append(track_id)

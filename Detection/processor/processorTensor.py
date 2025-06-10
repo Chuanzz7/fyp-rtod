@@ -35,7 +35,6 @@ def processor_tensor_main(frame_input_queue: Queue, output_queue: Queue):
 
         # Run inference
         output, inference_time = inference_engine.run_inference(img)
-        print(f"  ▸ Optimized Inference: {inference_time:.1f} ms")
 
         # Process detections
         detections = DetectionProcessor.process_detections(output)
@@ -47,20 +46,20 @@ def processor_tensor_main(frame_input_queue: Queue, output_queue: Queue):
         # Extract crops only for objects needing OCR
         sort_start = time.perf_counter()
         crops, crop_metadata, track_ids_needing_ocr = CropExtractor.extract_crops(
-            img, track_info, object_cache
+            img, track_info, object_cache, min_frames=4
         )
 
         # Process OCR only for new objects
         if crops:
+            t_start = time.perf_counter()
             print(f"  ▸ Processing OCR for {len(crops)} new objects")
             ocr_results = ocr_processor.process_crops(crops)
+            t_end = time.perf_counter()
 
             # Update cache with OCR results
             for (x1, y1, x2, y2, track_id, class_name, score), ocr_lines in zip(crop_metadata, ocr_results):
                 filtered_ocr = OCRProcessor.filter_ocr_results(ocr_lines)
                 object_cache.update_object(track_id, (x1, y1, x2, y2), frame_id, class_name, filtered_ocr)
-        else:
-            print("  ▸ No new objects need OCR processing")
 
         # Update cache for all tracked objects (even those without new OCR)
         for x1, y1, x2, y2, track_id, class_name, score in track_info:
@@ -69,9 +68,7 @@ def processor_tensor_main(frame_input_queue: Queue, output_queue: Queue):
 
         # Cleanup old tracks
         object_cache.cleanup_old_tracks(frame_id)
-
         sort_end = time.perf_counter()
-        print(f"  ▸ SORT & Cache: {(sort_end - sort_start) * 1000:.1f} ms")
 
         # Create panel rows
         panel_rows = ResultAssembler.create_panel_rows(track_info, object_cache)
@@ -81,7 +78,6 @@ def processor_tensor_main(frame_input_queue: Queue, output_queue: Queue):
         labels, boxes, scores = output["labels"], output["boxes"], output["scores"]
         pil_img = draw([Image.fromarray(img)], labels, boxes, scores, 0.8)
         draw_end = time.perf_counter()
-        print(f"  ▸ Draw: {(draw_end - draw_start) * 1000:.1f} ms")
 
         # Assemble final output
         data = {
@@ -92,7 +88,11 @@ def processor_tensor_main(frame_input_queue: Queue, output_queue: Queue):
         }
 
         processor_end = time.perf_counter()
-        print(f"Total Processing: {(processor_end - processor_start) * 1000:.1f} ms")
+        # print(f"  ▸ Optimized Inference: {inference_time:.1f} ms")
+        # print(f"  ▸ SORT & Cache: {(sort_end - sort_start) * 1000:.1f} ms")
+        # print(f"  ▸ OCR (batch): {(t_end - t_start) * 1000:.1f} ms")
+        # print(f"  ▸ Draw: {(draw_end - draw_start) * 1000:.1f} ms")
+        # print(f"Total Processing: {(processor_end - processor_start) * 1000:.1f} ms")
 
         output_queue.put(data)
         frame_id += 1

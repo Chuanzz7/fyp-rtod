@@ -1,3 +1,4 @@
+import asyncio
 import io
 import queue
 import time
@@ -7,6 +8,10 @@ from PIL import ImageDraw, ImageFont
 
 from Detection.helper import videoHelper
 from Detection.helper.dataClass import COCO_CLASSES
+
+api_called_ids = set()
+api_id_last_seen = dict()
+API_ID_MAX_AGE = 100  # frames (tweak as needed)
 
 ASSIGNED_REGIONS = [
     {
@@ -34,6 +39,10 @@ def process_output_main(input_queue: Queue, mjpeg_frame_queue: Queue):
         checked_panel_rows = check_wrong_placement(
             data["panel_rows"], ASSIGNED_REGIONS
         )
+
+        # --- API CALL: Call only once per object/track_id with OCR text ---
+        asyncio.run(call_product_api_from_panel(checked_panel_rows, frame_count))
+        # ---------------------------------------------------------------
 
         pil_img_with_boxes = draw_assigned_regions_on_frame(data["pil_img"], ASSIGNED_REGIONS)
 
@@ -77,27 +86,12 @@ def check_wrong_placement(panel_rows, assigned_regions, iou_threshold=0.1):
       - 'Wrong Region' if label/ocr does NOT match region's assignment
       - 'Unassigned' if not in any region
     Returns: list of dicts (detection + status)
-
-    Updated to work with new flattened data structure where OCR text is directly in row
     """
     results = []
 
     for row in panel_rows:
         det_bbox = row["box"]
         det_label = row["class_name"]
-
-        # Handle new flattened structure - OCR text is directly in the row
-        ocr_texts = []
-        if "ocr_text" in row and row["ocr_text"]:
-            # Single OCR text field
-            ocr_texts = [row["ocr_text"].lower()]
-        elif "ocr_results" in row and row["ocr_results"]:
-            # Backward compatibility - if ocr_results still exists as nested structure
-            ocr_texts = [o["ocr_text"].lower() for o in row["ocr_results"]
-                         if isinstance(o, dict) and "ocr_text" in o and o["ocr_text"]]
-        elif "text" in row and row["text"]:
-            # Alternative field name for OCR text
-            ocr_texts = [row["text"].lower()]
 
         status = "Unassigned"
         matched_region_label = None
@@ -110,22 +104,10 @@ def check_wrong_placement(panel_rows, assigned_regions, iou_threshold=0.1):
             if iou > iou_threshold:
                 matched_region_label = reg["label"]
 
-                # Class-based region matching
-                if reg["type"] == "class":
-                    if det_label.lower() == reg["label"].lower():
-                        status = "Correct Region"
-                    else:
-                        status = f"Wrong Region ({reg['label']})"
-
-                # OCR-based region matching
-                elif reg["type"] == "ocr":
-                    # Check if any OCR text contains the region label
-                    if ocr_texts and any(reg["label"].lower() in t for t in ocr_texts):
-                        status = "Correct Region"
-                    else:
-                        status = f"Wrong Region ({reg['label']})"
-
-                break  # Stop after first region overlap
+                if det_label.lower() == reg["label"].lower():
+                    status = "Correct Region"
+                else:
+                    status = f"Wrong Region ({reg['label']})"
 
         # Create result with all original data plus status
         result = {
@@ -133,7 +115,6 @@ def check_wrong_placement(panel_rows, assigned_regions, iou_threshold=0.1):
             "region_status": status,
             "matched_region": matched_region_label,
         }
-
         results.append(result)
 
     return results
@@ -205,3 +186,46 @@ def draw_assigned_regions_on_frame(pil_img, assigned_regions):
         # Draw label (top-left of region)
         draw.text((x1 + 5, y1 + 5), label, fill=color)
     return pil_img
+
+
+async def call_product_api_from_panel(panel_rows, frame_count):
+    tasks = []
+    current_frame_track_ids = set()
+    for row in panel_rows:
+        track_id = row["object_id"]
+        current_frame_track_ids.add(track_id)
+        if track_id in api_called_ids:
+            continue
+        ocr_results = row.get("ocr_results", [])
+        ocr_text = " ".join([r["text"] for r in ocr_results if "text" in r])
+        class_name = row["class_name"]
+        if ocr_text.strip():
+            tasks.append(fetch_product_id_async(class_name, ocr_text))
+            api_called_ids.add(track_id)
+        # Always update last seen for active IDs
+        api_id_last_seen[track_id] = frame_count
+
+    # Cleanup IDs not seen for > API_ID_MAX_AGE frames
+    to_remove = [tid for tid, last_seen in api_id_last_seen.items()
+                 if frame_count - last_seen > API_ID_MAX_AGE]
+    for tid in to_remove:
+        api_called_ids.discard(tid)
+        api_id_last_seen.pop(tid, None)
+
+    if tasks:
+        await asyncio.gather(*tasks)
+
+async def fetch_product_id_async(class_name, ocr_text):
+    import httpx
+    url = "http://localhost:8001/api/product_lookup"
+    try:
+        async with httpx.AsyncClient(timeout=1.0) as client:
+            resp = await client.post(url, json={"category": class_name, "ocr": ocr_text})
+            if resp.status_code == 200:
+                data = resp.json()
+                print(
+                    f"[API] {class_name} + {ocr_text} → ProductID: {data.get('product_id')}, conf: {data.get('confidence')}")
+            else:
+                print(f"[API] Error {resp.status_code}: {resp.text}")
+    except Exception as e:
+        print(f"[API] Exception: {e}")
