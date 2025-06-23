@@ -1,22 +1,31 @@
-# main.py
+import uuid
 from contextlib import asynccontextmanager
+from pathlib import Path
 
 import uvicorn
-from fastapi import FastAPI, HTTPException, Depends, Body
+from fastapi import FastAPI, HTTPException, Depends, Body, UploadFile, File, Form
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.staticfiles import StaticFiles
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.future import select
 
 from config.database import get_db, engine
 from models.models import Product, Base
-from models.schemas import ProductCreate, ProductUpdate, ProductOut
+from models.schemas import ProductOut
 
 # Allow your frontend origin, or use ["*"] for any (dev only!)
 origins = [
     "http://localhost:5173",
     # add more origins if needed, e.g. "http://127.0.0.1:5173"
 ]
+
+# Create uploads directory if it doesn't exist
+UPLOAD_DIR = Path("uploads")
+UPLOAD_DIR.mkdir(exist_ok=True)
+
+# Allowed image extensions
+ALLOWED_EXTENSIONS = {".jpg", ".jpeg", ".png", ".gif", ".webp"}
 
 
 @asynccontextmanager
@@ -37,6 +46,31 @@ app.add_middleware(
     allow_headers=["*"],  # allow all headers
 )
 
+# Mount static files to serve uploaded images
+app.mount("/uploads", StaticFiles(directory="uploads"), name="uploads")
+
+
+def save_uploaded_file(file: UploadFile) -> str:
+    """Save uploaded file and return the file path"""
+    # Check file extension
+    file_extension = Path(file.filename).suffix.lower()
+    if file_extension not in ALLOWED_EXTENSIONS:
+        raise HTTPException(
+            status_code=400,
+            detail=f"File type not allowed. Allowed types: {', '.join(ALLOWED_EXTENSIONS)}"
+        )
+
+    # Generate unique filename
+    unique_filename = f"{uuid.uuid4()}{file_extension}"
+    file_path = UPLOAD_DIR / unique_filename
+
+    # Save file
+    with open(file_path, "wb") as buffer:
+        content = file.file.read()
+        buffer.write(content)
+
+    return str(unique_filename)
+
 
 @app.get("/api/products", response_model=list[ProductOut])
 async def list_products(db: AsyncSession = Depends(get_db)):
@@ -45,8 +79,35 @@ async def list_products(db: AsyncSession = Depends(get_db)):
 
 
 @app.post("/api/products", response_model=ProductOut)
-async def create_product(product: ProductCreate, db: AsyncSession = Depends(get_db)):
-    db_product = Product(**product.dict())
+async def create_product(
+        name: str = Form(...),
+        description: str = Form(""),
+        category: str = Form(""),
+        price: float = Form(0.0),
+        quantity: int = Form(0),
+        ocr: str = Form(""),
+        inventoryStatus: str = Form("INSTOCK"),
+        image: UploadFile = File(None),
+        db: AsyncSession = Depends(get_db)
+):
+    # Handle image upload
+    image_filename = "product-placeholder.svg"  # default
+    if image:
+        image_filename = save_uploaded_file(image)
+
+    # Create product data
+    product_data = {
+        "name": name,
+        "description": description,
+        "category": category,
+        "price": price,
+        "quantity": quantity,
+        "image": image_filename,
+        "ocr": ocr,
+        "inventoryStatus": inventoryStatus
+    }
+
+    db_product = Product(**product_data)
     db.add(db_product)
     await db.commit()
     await db.refresh(db_product)
@@ -54,13 +115,55 @@ async def create_product(product: ProductCreate, db: AsyncSession = Depends(get_
 
 
 @app.put("/api/products/{product_id}", response_model=ProductOut)
-async def update_product(product_id: int, product: ProductUpdate, db: AsyncSession = Depends(get_db)):
+async def update_product(
+        product_id: int,
+        name: str = Form(None),
+        description: str = Form(None),
+        category: str = Form(None),
+        price: float = Form(None),
+        quantity: int = Form(None),
+        ocr: str = Form(None),
+        inventoryStatus: str = Form(None),
+        image: UploadFile = File(None),
+        db: AsyncSession = Depends(get_db)
+):
     result = await db.execute(select(Product).where(Product.id == product_id))
     db_product = result.scalar_one_or_none()
     if not db_product:
         raise HTTPException(status_code=404, detail="Product not found")
-    for key, value in product.dict(exclude_unset=True).items():
+
+    # Update fields that are provided
+    update_data = {}
+    if name is not None:
+        update_data["name"] = name
+    if description is not None:
+        update_data["description"] = description
+    if category is not None:
+        update_data["category"] = category
+    if price is not None:
+        update_data["price"] = price
+    if quantity is not None:
+        update_data["quantity"] = quantity
+    if ocr is not None:
+        update_data["ocr"] = ocr
+    if inventoryStatus is not None:
+        update_data["inventoryStatus"] = inventoryStatus
+
+    # Handle image upload
+    if image:
+        # Delete old image if it's not the placeholder
+        if db_product.image != "product-placeholder.svg":
+            old_image_path = UPLOAD_DIR / db_product.image
+            if old_image_path.exists():
+                old_image_path.unlink()
+
+        # Save new image
+        update_data["image"] = save_uploaded_file(image)
+
+    # Apply updates
+    for key, value in update_data.items():
         setattr(db_product, key, value)
+
     await db.commit()
     await db.refresh(db_product)
     return db_product
@@ -72,6 +175,13 @@ async def delete_product(product_id: int, db: AsyncSession = Depends(get_db)):
     db_product = result.scalar_one_or_none()
     if not db_product:
         raise HTTPException(status_code=404, detail="Product not found")
+
+    # Delete associated image file if it's not the placeholder
+    if db_product.image != "product-placeholder.svg":
+        image_path = UPLOAD_DIR / db_product.image
+        if image_path.exists():
+            image_path.unlink()
+
     await db.delete(db_product)
     await db.commit()
     return {"detail": "Product deleted"}
@@ -84,13 +194,13 @@ async def fuzzy_product_lookup(
         db: AsyncSession = Depends(get_db)
 ):
     query = text("""
-        SELECT *, similarity(ocr, :ocr) AS sim
-        FROM products
-        WHERE ocr % :ocr
+                 SELECT *, similarity(ocr, :ocr) AS sim
+                 FROM products
+                 WHERE ocr % :ocr
           AND category = :category
-        ORDER BY sim DESC
-        LIMIT 1
-    """)
+                 ORDER BY sim DESC
+                     LIMIT 1
+                 """)
     result = await db.execute(query, {"ocr": ocr, "category": category})
     row = result.first()
     if not row:
