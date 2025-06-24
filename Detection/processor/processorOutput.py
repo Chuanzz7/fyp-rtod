@@ -7,27 +7,17 @@ from multiprocessing import Queue
 from PIL import ImageDraw, ImageFont
 
 from Detection.helper import videoHelper
-from Detection.helper.dataClass import COCO_CLASSES
 
 api_called_ids = set()
 api_id_last_seen = dict()
-API_ID_MAX_AGE = 100  # frames (tweak as needed)
 
-ASSIGNED_REGIONS = [
-    {
-        "label": COCO_CLASSES[39][1],  # user label, could be from OCR or model class
-        "bbox": [0, 0, 320, 640],  # [x1, y1, x2, y2] in image coordinates
-        "type": "class",  # "ocr" or "class" (how to compare)
-    },
-]
+# Remove the global ASSIGNED_REGIONS since it's now in shared config
 
 
-def process_output_main(input_queue: Queue, mjpeg_frame_queue: Queue):
+def process_output_main(input_queue: Queue, mjpeg_frame_queue: Queue, shared_config):
     last_time = time.time()
     frame_count = 0
     fps = 0
-
-    font = ImageFont.truetype("arial.ttf", 28)  # Choose size to taste
 
     while True:
         try:
@@ -35,22 +25,36 @@ def process_output_main(input_queue: Queue, mjpeg_frame_queue: Queue):
         except queue.Empty:
             continue
 
-        # Compute placement status for all detections
+        # Get current configuration values including assigned_regions
+        iou_threshold = shared_config.get('iou_threshold', 0.1)
+        api_id_max_age = shared_config.get('api_id_max_age', 100)
+        jpeg_quality = shared_config.get('jpeg_quality', 85)
+        fps_update_interval = shared_config.get('fps_update_interval', 1.0)
+        font_size = shared_config.get('font_size', 28)
+        assigned_regions = list(shared_config.get('assigned_regions', []))
+
+        # Use dynamic font size
+        try:
+            font = ImageFont.truetype("arial.ttf", font_size)
+        except OSError:
+            font = ImageFont.load_default()
+
+        # Compute placement status for all detections with dynamic IoU threshold and regions
         checked_panel_rows = check_wrong_placement(
-            data["panel_rows"], ASSIGNED_REGIONS
+            data["panel_rows"], assigned_regions, iou_threshold=iou_threshold
         )
 
         # --- API CALL: Call only once per object/track_id with OCR text ---
-        asyncio.run(call_product_api_from_panel(checked_panel_rows, frame_count))
+        asyncio.run(call_product_api_from_panel(checked_panel_rows, frame_count, api_id_max_age))
         # ---------------------------------------------------------------
 
-        pil_img_with_boxes = draw_assigned_regions_on_frame(data["pil_img"], ASSIGNED_REGIONS)
+        pil_img_with_boxes = draw_assigned_regions_on_frame(data["pil_img"], assigned_regions)
 
-        # === FPS Calculation ===
+        # === FPS Calculation with dynamic interval ===
         frame_count += 1
         now = time.time()
         elapsed = now - last_time
-        if elapsed >= 1.0:
+        if elapsed >= fps_update_interval:
             fps = frame_count / elapsed
             frame_count = 0
             last_time = now
@@ -68,7 +72,7 @@ def process_output_main(input_queue: Queue, mjpeg_frame_queue: Queue):
 
         composite = videoHelper.side_by_side(pil_img_with_boxes, panel)
         buf = io.BytesIO()
-        composite.save(buf, format="JPEG", quality=85)
+        composite.save(buf, format="JPEG", quality=jpeg_quality)
         jpeg_bytes = buf.getvalue()
 
         try:
@@ -188,7 +192,7 @@ def draw_assigned_regions_on_frame(pil_img, assigned_regions):
     return pil_img
 
 
-async def call_product_api_from_panel(panel_rows, frame_count):
+async def call_product_api_from_panel(panel_rows, frame_count, api_id_max_age=100):
     tasks = []
     current_frame_track_ids = set()
     for row in panel_rows:
@@ -205,9 +209,9 @@ async def call_product_api_from_panel(panel_rows, frame_count):
         # Always update last seen for active IDs
         api_id_last_seen[track_id] = frame_count
 
-    # Cleanup IDs not seen for > API_ID_MAX_AGE frames
+    # Cleanup IDs not seen for > api_id_max_age frames
     to_remove = [tid for tid, last_seen in api_id_last_seen.items()
-                 if frame_count - last_seen > API_ID_MAX_AGE]
+                 if frame_count - last_seen > api_id_max_age]
     for tid in to_remove:
         api_called_ids.discard(tid)
         api_id_last_seen.pop(tid, None)

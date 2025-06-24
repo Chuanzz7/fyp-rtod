@@ -5,6 +5,8 @@ import requests
 from fastapi import FastAPI, Request, UploadFile, File
 from fastapi.middleware.cors import CORSMiddleware
 from starlette.responses import StreamingResponse, JSONResponse
+from pydantic import BaseModel
+from typing import List, Optional
 
 from Detection.processor.processorSingleImage import SingleImageProcessor
 
@@ -26,9 +28,39 @@ app.add_middleware(
 )
 PI_URL = "http://192.168.0.93:9000"
 
-def inject_queues(frame_queue, mjpeg_queue):
+
+# Pydantic models for bounding box API
+class BoundingBox(BaseModel):
+    x1: int
+    y1: int
+    x2: int
+    y2: int
+
+
+class RegionUpdate(BaseModel):
+    label: str
+    bbox: BoundingBox
+    type: str = "class"
+
+
+class RegionsUpdate(BaseModel):
+    regions: List[RegionUpdate]
+
+
+# Updated configuration model to include assigned_regions
+class ConfigUpdate(BaseModel):
+    iou_threshold: Optional[float] = None
+    api_id_max_age: Optional[int] = None
+    jpeg_quality: Optional[int] = None
+    fps_update_interval: Optional[float] = None
+    font_size: Optional[int] = None
+    assigned_regions: Optional[List[RegionUpdate]] = None
+
+
+def inject_queues(frame_queue, mjpeg_queue, shared_config):
     app.state.frame_input_queue = frame_queue
     app.state.mjpeg_frame_queue = mjpeg_queue
+    app.state.shared_config = shared_config
     app.state.single_image_processor = SingleImageProcessor()
 
 
@@ -67,6 +99,173 @@ async def upload_frame(image: UploadFile = File(...)):
         ocr_threshold=0.5
     )
     return JSONResponse(content=result)
+
+
+@app.get("/api/regions")
+async def get_regions():
+    """Get current assigned regions from shared config"""
+    try:
+        regions = list(app.state.shared_config['assigned_regions'])
+        return {"regions": regions}
+    except Exception as e:
+        return {"status": "error", "message": str(e)}
+
+
+@app.post("/api/regions")
+async def update_regions(regions_update: RegionsUpdate):
+    """Update assigned regions in shared config"""
+    try:
+        # Convert Pydantic models to the expected format
+        new_regions = []
+        for region in regions_update.regions:
+            new_regions.append({
+                "label": region.label,
+                "bbox": [region.bbox.x1, region.bbox.y1, region.bbox.x2, region.bbox.y2],
+                "type": region.type
+            })
+
+        # Update the shared config assigned_regions
+        app.state.shared_config['assigned_regions'][:] = new_regions
+
+        return {"status": "success", "message": f"Updated {len(new_regions)} regions"}
+    except Exception as e:
+        return {"status": "error", "message": str(e)}
+
+
+@app.post("/api/regions/single")
+async def update_single_region(region_index: int, region_update: RegionUpdate):
+    """Update a single region by index in shared config"""
+    try:
+        assigned_regions = app.state.shared_config['assigned_regions']
+
+        if region_index < 0 or region_index >= len(assigned_regions):
+            return {"status": "error", "message": "Invalid region index"}
+
+        # Update the specific region
+        assigned_regions[region_index] = {
+            "label": region_update.label,
+            "bbox": [region_update.bbox.x1, region_update.bbox.y1, region_update.bbox.x2, region_update.bbox.y2],
+            "type": region_update.type
+        }
+
+        return {"status": "success", "message": f"Updated region {region_index}"}
+    except Exception as e:
+        return {"status": "error", "message": str(e)}
+
+
+@app.delete("/api/regions/{region_index}")
+async def delete_region(region_index: int):
+    """Delete a region by index from shared config"""
+    try:
+        assigned_regions = app.state.shared_config['assigned_regions']
+
+        if region_index < 0 or region_index >= len(assigned_regions):
+            return {"status": "error", "message": "Invalid region index"}
+
+        # Remove the region
+        del assigned_regions[region_index]
+
+        return {"status": "success", "message": f"Deleted region {region_index}"}
+    except Exception as e:
+        return {"status": "error", "message": str(e)}
+
+
+# Updated configuration endpoints
+@app.get("/api/config")
+async def get_config():
+    """Get current configuration including assigned_regions"""
+    try:
+        config = dict(app.state.shared_config)
+        # Convert assigned_regions to regular list for JSON serialization
+        config['assigned_regions'] = list(config['assigned_regions'])
+        return {"status": "success", "config": config}
+    except Exception as e:
+        return {"status": "error", "message": str(e)}
+
+
+@app.post("/api/config")
+async def update_config(config_update: ConfigUpdate):
+    """Update configuration parameters including assigned_regions"""
+    try:
+        updated_fields = []
+
+        # Update only non-None fields
+        if config_update.iou_threshold is not None:
+            if 0.0 <= config_update.iou_threshold <= 1.0:
+                app.state.shared_config['iou_threshold'] = config_update.iou_threshold
+                updated_fields.append('iou_threshold')
+            else:
+                return {"status": "error", "message": "iou_threshold must be between 0.0 and 1.0"}
+
+        if config_update.api_id_max_age is not None:
+            if config_update.api_id_max_age > 0:
+                app.state.shared_config['api_id_max_age'] = config_update.api_id_max_age
+                updated_fields.append('api_id_max_age')
+            else:
+                return {"status": "error", "message": "api_id_max_age must be positive"}
+
+        if config_update.jpeg_quality is not None:
+            if 1 <= config_update.jpeg_quality <= 100:
+                app.state.shared_config['jpeg_quality'] = config_update.jpeg_quality
+                updated_fields.append('jpeg_quality')
+            else:
+                return {"status": "error", "message": "jpeg_quality must be between 1 and 100"}
+
+        if config_update.fps_update_interval is not None:
+            if config_update.fps_update_interval > 0:
+                app.state.shared_config['fps_update_interval'] = config_update.fps_update_interval
+                updated_fields.append('fps_update_interval')
+            else:
+                return {"status": "error", "message": "fps_update_interval must be positive"}
+
+        if config_update.font_size is not None:
+            if config_update.font_size > 0:
+                app.state.shared_config['font_size'] = config_update.font_size
+                updated_fields.append('font_size')
+            else:
+                return {"status": "error", "message": "font_size must be positive"}
+
+        # Handle assigned_regions update
+        if config_update.assigned_regions is not None:
+            new_regions = []
+            for region in config_update.assigned_regions:
+                new_regions.append({
+                    "label": region.label,
+                    "bbox": [region.bbox.x1, region.bbox.y1, region.bbox.x2, region.bbox.y2],
+                    "type": region.type
+                })
+            app.state.shared_config['assigned_regions'][:] = new_regions
+            updated_fields.append('assigned_regions')
+
+        # Convert for JSON response
+        current_config = dict(app.state.shared_config)
+        current_config['assigned_regions'] = list(current_config['assigned_regions'])
+
+        return {
+            "status": "success",
+            "message": f"Updated {len(updated_fields)} configuration parameters",
+            "updated_fields": updated_fields,
+            "current_config": current_config
+        }
+    except Exception as e:
+        return {"status": "error", "message": str(e)}
+
+
+@app.patch("/api/config/iou_threshold")
+async def update_iou_threshold(iou_threshold: float):
+    """Update IoU threshold specifically"""
+    try:
+        if 0.0 <= iou_threshold <= 1.0:
+            app.state.shared_config['iou_threshold'] = iou_threshold
+            return {
+                "status": "success",
+                "message": f"IoU threshold updated to {iou_threshold}",
+                "iou_threshold": iou_threshold
+            }
+        else:
+            return {"status": "error", "message": "IoU threshold must be between 0.0 and 1.0"}
+    except Exception as e:
+        return {"status": "error", "message": str(e)}
 
 
 async def mjpeg_generator():

@@ -8,6 +8,7 @@ import uvicorn
 
 from Detection import api
 from Detection.processor import processorTensor, processorOutput
+from Detection.helper.dataClass import COCO_CLASSES
 
 os.environ["KMP_DUPLICATE_LIB_OK"] = "TRUE"
 
@@ -23,15 +24,31 @@ if __name__ == "__main__":
     inference_output_queue = manager.Queue(maxsize=5)
     mjpeg_frame_queue = manager.Queue(maxsize=10)
 
+    # Create shared configuration dictionary with assigned_regions
+    shared_config = manager.dict({
+        'iou_threshold': 0.1,
+        'api_id_max_age': 100,
+        'jpeg_quality': 85,
+        'fps_update_interval': 1.0,
+        'font_size': 28,
+        'assigned_regions': manager.list([
+            {
+                "label": COCO_CLASSES[39][1],  # user label, could be from OCR or model class
+                "bbox": [0, 0, 320, 640],  # [x1, y1, x2, y2] in image coordinates
+                "type": "class",  # "ocr" or "class" (how to compare)
+            },
+        ])
+    })
+
     p1 = Process(target=processorTensor.processor_tensor_main, args=(frame_input_queue, inference_output_queue))
-    p2 = Process(target=processorOutput.process_output_main, args=(inference_output_queue, mjpeg_frame_queue))
+    p2 = Process(target=processorOutput.process_output_main,
+                 args=(inference_output_queue, mjpeg_frame_queue, shared_config))
 
     p1.start()
     p2.start()
 
-    # Run API and inject queues
-    # You can set api.py's queues here by importing or via global vars before uvicorn.run
-    api.inject_queues(frame_input_queue, mjpeg_frame_queue)
+    # Run API and inject queues and shared config
+    api.inject_queues(frame_input_queue, mjpeg_frame_queue, shared_config)
 
     # Start Uvicorn in a thread so the main process isn't blocked
     uvicorn_thread = threading.Thread(target=run_uvicorn, daemon=True)
