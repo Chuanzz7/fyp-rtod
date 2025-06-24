@@ -25,6 +25,7 @@ class ProductUpdate(ProductBase):
 
 class ProductOut(ProductBase):
     id: int
+    code: str
 
     class Config:
         from_attributes = True  # <--- NEW (Pydantic v2+)

@@ -1,3 +1,4 @@
+
 # models.py
 from sqlalchemy import String, Integer, Float
 from sqlalchemy.ext.asyncio import AsyncAttrs
@@ -12,6 +13,7 @@ class Product(Base):
     __tablename__ = 'products'
 
     id: Mapped[int] = mapped_column(primary_key=True, index=True)
+    code: Mapped[str] = mapped_column(String(10), unique=True, index=True)
     name: Mapped[str] = mapped_column(String(128))
     description: Mapped[str] = mapped_column(String(1024), default="")
     category: Mapped[str] = mapped_column(String(64), default="")
@@ -20,4 +22,3 @@ class Product(Base):
     image: Mapped[str] = mapped_column(String(256), default="product-placeholder.svg")
     ocr: Mapped[str] = mapped_column(String(256), default="")
     inventoryStatus: Mapped[str] = mapped_column(String(256), default="INSTOCK")
-

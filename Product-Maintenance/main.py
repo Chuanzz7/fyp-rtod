@@ -6,7 +6,7 @@ import uvicorn
 from fastapi import FastAPI, HTTPException, Depends, Body, UploadFile, File, Form
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
-from sqlalchemy import text
+from sqlalchemy import text, func, Integer
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.future import select
 
@@ -48,6 +48,23 @@ app.add_middleware(
 
 # Mount static files to serve uploaded images
 app.mount("/uploads", StaticFiles(directory="uploads"), name="uploads")
+
+
+async def generate_product_code(db: AsyncSession) -> str:
+    """Generate next product code with P prefix (P00001, P00002, etc.)"""
+    # Get the highest existing code number
+    result = await db.execute(
+        select(func.max(func.substr(Product.code, 2).cast(Integer)))
+        .where(Product.code.like('P%'))
+    )
+    max_num = result.scalar()
+
+    if max_num is None:
+        next_num = 1
+    else:
+        next_num = max_num + 1
+
+    return f"P{next_num:05d}"
 
 
 def save_uploaded_file(file: UploadFile) -> str:
@@ -95,8 +112,12 @@ async def create_product(
     if image:
         image_filename = save_uploaded_file(image)
 
+    # Generate product code
+    product_code = await generate_product_code(db)
+
     # Create product data
     product_data = {
+        "code": product_code,
         "name": name,
         "description": description,
         "category": category,
