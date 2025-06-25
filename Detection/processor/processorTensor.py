@@ -6,6 +6,7 @@ from multiprocessing import Queue
 from PIL import Image
 
 from DFINE.tools.inference.trt_inf import draw
+from Detection.helper import drawHelper
 from Detection.helper.imageProcessingHelper import GPUBufferManager, InferenceEngine, TrackingManager, OCRProcessor, \
     ObjectCache, decode_frame, DetectionProcessor, CropExtractor, ResultAssembler
 
@@ -94,14 +95,14 @@ def processor_tensor_main(frame_input_queue: Queue, output_queue: Queue, shared_
         # Draw results
         draw_start = time.perf_counter()
         labels, boxes, scores = output["labels"], output["boxes"], output["scores"]
-        pil_img = draw([Image.fromarray(img)], labels, boxes, scores, 0.8)
+        np_img = drawHelper.draw(img, labels, boxes, scores, thrh=0.4)
         draw_end = time.perf_counter()
 
         # Assemble final output
         data = {
             "frame_id": frame_id,
             "img": img,
-            "pil_img": pil_img[0],
+            "np_img": np_img,
             "panel_rows": panel_rows,
         }
 

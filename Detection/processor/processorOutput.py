@@ -1,10 +1,10 @@
 import asyncio
-import io
 import queue
 import time
 from multiprocessing import Queue
 
-from PIL import ImageDraw, ImageFont
+import cv2
+import numpy as np
 
 from Detection.helper import videoHelper
 
@@ -51,13 +51,13 @@ def process_output_main(input_queue: Queue, mjpeg_frame_queue: Queue, shared_con
 
         # ============ 4. Draw boxes and composite
         draw_start = time.perf_counter()
-        pil_img_with_boxes = draw_assigned_regions_on_frame(data["pil_img"],
-                                                            list(shared_config.get('assigned_regions', [])))
-        panel = videoHelper.build_detection_panel(enriched_panel_rows, pil_img_with_boxes.height)
-        composite = videoHelper.side_by_side(pil_img_with_boxes, panel)
-        buf = io.BytesIO()
-        composite.save(buf, format="JPEG", quality=shared_config.get('jpeg_quality', 85))
-        jpeg_bytes = buf.getvalue()
+        np_img_with_boxes = videoHelper.draw_assigned_regions_on_frame(data["np_img"],
+                                                                       list(shared_config.get('assigned_regions', [])))
+        panel = videoHelper.build_detection_panel(enriched_panel_rows, data["np_img"].shape[0], )
+        composite = videoHelper.side_by_side(np_img_with_boxes, panel)
+        encode_param = [cv2.IMWRITE_JPEG_QUALITY, 85]
+        success, encoded_image = cv2.imencode('.jpg', composite, encode_param)
+        jpeg_bytes = encoded_image.tobytes()
         draw_end = time.perf_counter()
 
         # ============ 5. Output FPS
@@ -70,12 +70,6 @@ def process_output_main(input_queue: Queue, mjpeg_frame_queue: Queue, shared_con
             last_time = now
             shared_metrics.setdefault("output_fps", []).append(fps)
             shared_metrics["output_fps"][:] = shared_metrics["output_fps"][-N:]
-
-        # === Overlay FPS on the image ===
-        draw = ImageDraw.Draw(pil_img_with_boxes)
-        text = f"FPS: {fps:.2f}"
-        draw.rectangle((10, 10, 140, 45), fill=(0, 0, 0, 127))  # semi-transparent background
-        draw.text((15, 15), text, fill=(255, 255, 0), font=ImageFont.truetype("arial.ttf", 20))  # yellow text
 
         # ============ 6. Total processing time
         stage_end = time.perf_counter()
@@ -108,23 +102,19 @@ def process_output_main(input_queue: Queue, mjpeg_frame_queue: Queue, shared_con
 def add_api_results_to_panel(panel_rows):
     """Add API results to panel rows for display"""
     enriched_rows = []
-    current_time = time.perf_counter()
 
     for row in panel_rows:
         track_id = row["object_id"]
         enriched_row = row.copy()
 
-        # Add API result if available and recent (within 30 seconds)
         if track_id in api_results:
             api_data = api_results[track_id]
-            if current_time - api_data["timestamp"] < 30:  # Show for 30 seconds
-                enriched_row["api_result"] = {
-                    "code": api_data["code"],
-                    "confidence": api_data["confidence"]
-                }
+            enriched_row["api_result"] = {
+                "code": api_data["code"],
+                "confidence": api_data["confidence"]
+            }
 
         enriched_rows.append(enriched_row)
-
     return enriched_rows
 
 
@@ -220,21 +210,6 @@ def compute_iou(bbox1, bbox2):
     except Exception as e:
         print(f"Error computing IoU for {bbox1} and {bbox2}: {e}")
         return 0.0
-
-
-def draw_assigned_regions_on_frame(pil_img, assigned_regions):
-    """Draw assigned region bounding boxes and labels on the image."""
-    draw = ImageDraw.Draw(pil_img)
-    for reg in assigned_regions:
-        x1, y1, x2, y2 = reg["bbox"]
-        label = reg["label"]
-        # Choose color: left=blue, right=orange (customizable)
-        color = (80, 180, 255) if x1 == 0 else (255, 180, 80)
-        # Draw rectangle
-        draw.rectangle([x1, y1, x2, y2], outline=color, width=4)
-        # Draw label (top-left of region)
-        draw.text((x1 + 5, y1 + 5), label, fill=color)
-    return pil_img
 
 
 async def call_product_api_from_panel(panel_rows, frame_count, api_id_max_age=100):
