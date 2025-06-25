@@ -52,7 +52,7 @@ def processor_tensor_main(frame_input_queue: Queue, output_queue: Queue):
         # Process OCR only for new objects
         if crops:
             t_start = time.perf_counter()
-            print(f"  ▸ Processing OCR for {len(crops)} new objects")
+            # print(f"  ▸ Processing OCR for {len(crops)} new objects")
             ocr_results = ocr_processor.process_crops(crops)
             t_end = time.perf_counter()
 

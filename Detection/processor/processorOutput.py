@@ -10,6 +10,9 @@ from Detection.helper import videoHelper
 
 api_called_ids = set()
 api_id_last_seen = dict()
+# Store API results globally to display in frames
+api_results = dict()  # {track_id: {"code": str, "confidence": float, "timestamp": float}}
+
 
 # Remove the global ASSIGNED_REGIONS since it's now in shared config
 
@@ -48,6 +51,9 @@ def process_output_main(input_queue: Queue, mjpeg_frame_queue: Queue, shared_con
         asyncio.run(call_product_api_from_panel(checked_panel_rows, frame_count, api_id_max_age))
         # ---------------------------------------------------------------
 
+        # Add API results to panel rows for display
+        enriched_panel_rows = add_api_results_to_panel(checked_panel_rows)
+
         pil_img_with_boxes = draw_assigned_regions_on_frame(data["pil_img"], assigned_regions)
 
         # === FPS Calculation with dynamic interval ===
@@ -65,9 +71,9 @@ def process_output_main(input_queue: Queue, mjpeg_frame_queue: Queue, shared_con
         draw.rectangle((10, 10, 140, 45), fill=(0, 0, 0, 127))  # semi-transparent background
         draw.text((15, 15), text, fill=(255, 255, 0), font=font)  # yellow text
 
-        # Draw detection panel with placement info
+        # Draw detection panel with placement info and API results
         panel = videoHelper.build_detection_panel(
-            checked_panel_rows, pil_img_with_boxes.height,
+            enriched_panel_rows, pil_img_with_boxes.height,
         )
 
         composite = videoHelper.side_by_side(pil_img_with_boxes, panel)
@@ -81,6 +87,29 @@ def process_output_main(input_queue: Queue, mjpeg_frame_queue: Queue, shared_con
             pass
 
         input_queue.task_done()
+
+
+def add_api_results_to_panel(panel_rows):
+    """Add API results to panel rows for display"""
+    enriched_rows = []
+    current_time = time.time()
+
+    for row in panel_rows:
+        track_id = row["object_id"]
+        enriched_row = row.copy()
+
+        # Add API result if available and recent (within 30 seconds)
+        if track_id in api_results:
+            api_data = api_results[track_id]
+            if current_time - api_data["timestamp"] < 30:  # Show for 30 seconds
+                enriched_row["api_result"] = {
+                    "code": api_data["code"],
+                    "confidence": api_data["confidence"]
+                }
+
+        enriched_rows.append(enriched_row)
+
+    return enriched_rows
 
 
 def check_wrong_placement(panel_rows, assigned_regions, iou_threshold=0.1):
@@ -204,7 +233,7 @@ async def call_product_api_from_panel(panel_rows, frame_count, api_id_max_age=10
         ocr_text = " ".join([r["text"] for r in ocr_results if "text" in r])
         class_name = row["class_name"]
         if ocr_text.strip():
-            tasks.append(fetch_product_id_async(class_name, ocr_text))
+            tasks.append(fetch_product_id_async(class_name, ocr_text, track_id))
             api_called_ids.add(track_id)
         # Always update last seen for active IDs
         api_id_last_seen[track_id] = frame_count
@@ -215,11 +244,14 @@ async def call_product_api_from_panel(panel_rows, frame_count, api_id_max_age=10
     for tid in to_remove:
         api_called_ids.discard(tid)
         api_id_last_seen.pop(tid, None)
+        # Also cleanup API results
+        api_results.pop(tid, None)
 
     if tasks:
         await asyncio.gather(*tasks)
 
-async def fetch_product_id_async(class_name, ocr_text):
+
+async def fetch_product_id_async(class_name, ocr_text, track_id):
     import httpx
     url = "http://localhost:8001/api/product_lookup"
     try:
@@ -227,8 +259,17 @@ async def fetch_product_id_async(class_name, ocr_text):
             resp = await client.post(url, json={"category": class_name, "ocr": ocr_text})
             if resp.status_code == 200:
                 data = resp.json()
-                print(
-                    f"[API] {class_name} + {ocr_text} → ProductID: {data.get('product_id')}, conf: {data.get('confidence')}")
+                code = data.get('code')
+                confidence = data.get('confidence', 0.0)
+
+                # Store the API result with timestamp
+                api_results[track_id] = {
+                    "code": code,
+                    "confidence": confidence,
+                    "timestamp": time.time()
+                }
+
+                print(f"[API] {class_name} + {ocr_text} → ProductID: {code}, conf: {confidence}")
             else:
                 print(f"[API] Error {resp.status_code}: {resp.text}")
     except Exception as e:

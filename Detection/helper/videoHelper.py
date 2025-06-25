@@ -14,6 +14,7 @@ OCR_COLOR = (140, 210, 255)
 HIGH_CONF_COLOR = (110, 255, 110)
 MID_CONF_COLOR = (255, 210, 80)
 LOW_CONF_COLOR = (255, 100, 100)
+API_COLOR = (255, 150, 255)  # Magenta for API results
 
 
 def build_detection_panel(results, height, region_statuses=None):
@@ -21,6 +22,7 @@ def build_detection_panel(results, height, region_statuses=None):
     Return an RGB PIL image (PANEL_W × height) with:
     • Class name and detector confidence (large font)
     • Optional OCR text and its confidence (smaller font, colored)
+    • API results (if available)
     """
 
     panel = Image.new("RGB", (PANEL_W, height), BG_COLOR)
@@ -56,7 +58,20 @@ def build_detection_panel(results, height, region_statuses=None):
         draw.text((PADDING_X, y), label, fill=status_color, font=PRIMARY_FONT)
         y += PRIMARY_FONT.size + LINE_SPACING
 
-        # ── line-3: OCR results (if available) ──
+        # ── line-3: API results (if available) ──
+        if r.get("api_result"):
+            api_data = r["api_result"]
+            code = api_data.get("code", "Unknown")
+            api_conf = api_data.get("confidence", 0.0)
+
+            # Truncate product ID if too long
+            max_chars = 24
+            display_id = (code[:max_chars] + '…') if len(str(code)) > max_chars else str(code)
+            api_label = f"  API: {display_id} ({api_conf * 100:4.1f}%)"
+            draw.text((PADDING_X, y), api_label, fill=API_COLOR, font=SECONDARY_FONT)
+            y += SECONDARY_FONT.size + LINE_SPACING
+
+        # ── line-4: OCR results (if available) ──
         if r.get("ocr_results"):
             for o in r["ocr_results"]:
                 # Safe key access with fallbacks
