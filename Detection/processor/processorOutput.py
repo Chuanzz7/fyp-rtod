@@ -10,81 +10,97 @@ from Detection.helper import videoHelper
 
 api_called_ids = set()
 api_id_last_seen = dict()
-# Store API results globally to display in frames
 api_results = dict()  # {track_id: {"code": str, "confidence": float, "timestamp": float}}
 
 
-# Remove the global ASSIGNED_REGIONS since it's now in shared config
-
-
-def process_output_main(input_queue: Queue, mjpeg_frame_queue: Queue, shared_config):
+def process_output_main(input_queue: Queue, mjpeg_frame_queue: Queue, shared_config, shared_metrics):
     last_time = time.time()
     frame_count = 0
     fps = 0
+    N = 120  # keep last 120 samples for dashboard
 
     while True:
         try:
             data = input_queue.get(timeout=1)
         except queue.Empty:
+            api_called_ids.clear()
+            api_id_last_seen.clear()
+            api_results.clear()
             continue
 
-        # Get current configuration values including assigned_regions
-        iou_threshold = shared_config.get('iou_threshold', 0.1)
-        api_id_max_age = shared_config.get('api_id_max_age', 100)
-        jpeg_quality = shared_config.get('jpeg_quality', 85)
-        fps_update_interval = shared_config.get('fps_update_interval', 1.0)
-        font_size = shared_config.get('font_size', 28)
-        assigned_regions = list(shared_config.get('assigned_regions', []))
+        stage_start = time.perf_counter()
 
-        # Use dynamic font size
-        try:
-            font = ImageFont.truetype("arial.ttf", font_size)
-        except OSError:
-            font = ImageFont.load_default()
-
-        # Compute placement status for all detections with dynamic IoU threshold and regions
+        # ============ 1. Build panel rows (placement check)
+        panel_start = time.perf_counter()
         checked_panel_rows = check_wrong_placement(
-            data["panel_rows"], assigned_regions, iou_threshold=iou_threshold
+            data["panel_rows"], list(shared_config.get('assigned_regions', [])),
+            iou_threshold=shared_config.get('iou_threshold', 0.1)
         )
+        panel_end = time.perf_counter()
 
-        # --- API CALL: Call only once per object/track_id with OCR text ---
-        asyncio.run(call_product_api_from_panel(checked_panel_rows, frame_count, api_id_max_age))
-        # ---------------------------------------------------------------
+        # ============ 2. Async API calls (timing optional)
+        api_start = time.perf_counter()
+        asyncio.run(
+            call_product_api_from_panel(checked_panel_rows, frame_count, shared_config.get('api_id_max_age', 100)))
+        api_end = time.perf_counter()
 
-        # Add API results to panel rows for display
+        # ============ 3. Panel result enrichment
+        enrich_start = time.perf_counter()
         enriched_panel_rows = add_api_results_to_panel(checked_panel_rows)
+        enrich_end = time.perf_counter()
 
-        pil_img_with_boxes = draw_assigned_regions_on_frame(data["pil_img"], assigned_regions)
+        # ============ 4. Draw boxes and composite
+        draw_start = time.perf_counter()
+        pil_img_with_boxes = draw_assigned_regions_on_frame(data["pil_img"],
+                                                            list(shared_config.get('assigned_regions', [])))
+        panel = videoHelper.build_detection_panel(enriched_panel_rows, pil_img_with_boxes.height)
+        composite = videoHelper.side_by_side(pil_img_with_boxes, panel)
+        buf = io.BytesIO()
+        composite.save(buf, format="JPEG", quality=shared_config.get('jpeg_quality', 85))
+        jpeg_bytes = buf.getvalue()
+        draw_end = time.perf_counter()
 
-        # === FPS Calculation with dynamic interval ===
+        # ============ 5. Output FPS
         frame_count += 1
         now = time.time()
         elapsed = now - last_time
-        if elapsed >= fps_update_interval:
+        if elapsed >= 1.0:  # Update FPS every second
             fps = frame_count / elapsed
             frame_count = 0
             last_time = now
+            shared_metrics.setdefault("output_fps", []).append(fps)
+            shared_metrics["output_fps"][:] = shared_metrics["output_fps"][-N:]
 
         # === Overlay FPS on the image ===
         draw = ImageDraw.Draw(pil_img_with_boxes)
         text = f"FPS: {fps:.2f}"
         draw.rectangle((10, 10, 140, 45), fill=(0, 0, 0, 127))  # semi-transparent background
-        draw.text((15, 15), text, fill=(255, 255, 0), font=font)  # yellow text
+        draw.text((15, 15), text, fill=(255, 255, 0), font=ImageFont.truetype("arial.ttf", 20))  # yellow text
 
-        # Draw detection panel with placement info and API results
-        panel = videoHelper.build_detection_panel(
-            enriched_panel_rows, pil_img_with_boxes.height,
-        )
+        # ============ 6. Total processing time
+        stage_end = time.perf_counter()
 
-        composite = videoHelper.side_by_side(pil_img_with_boxes, panel)
-        buf = io.BytesIO()
-        composite.save(buf, format="JPEG", quality=jpeg_quality)
-        jpeg_bytes = buf.getvalue()
-
+        # ============ 7. Send output
         try:
             mjpeg_frame_queue.put_nowait(jpeg_bytes)
         except queue.Full:
             pass
+
+        panel_time_ms = (panel_end - panel_start) * 1000
+        shared_metrics.setdefault("output_panel_time_ms", []).append(panel_time_ms)
+        shared_metrics["output_panel_time_ms"][:] = shared_metrics["output_panel_time_ms"][-N:]
+        api_time_ms = (api_end - api_start) * 1000
+        shared_metrics.setdefault("output_api_time_ms", []).append(api_time_ms)
+        shared_metrics["output_api_time_ms"][:] = shared_metrics["output_api_time_ms"][-N:]
+        draw_time_ms = (draw_end - draw_start) * 1000
+        shared_metrics.setdefault("output_draw_time_ms", []).append(draw_time_ms)
+        shared_metrics["output_draw_time_ms"][:] = shared_metrics["output_draw_time_ms"][-N:]
+        enrich_time_ms = (enrich_end - enrich_start) * 1000
+        shared_metrics.setdefault("output_panel_enrich_time_ms", []).append(enrich_time_ms)
+        shared_metrics["output_panel_enrich_time_ms"][:] = shared_metrics["output_panel_enrich_time_ms"][-N:]
+        total_output_time_ms = (stage_end - stage_start) * 1000
+        shared_metrics.setdefault("output_total_processing_time_ms", []).append(total_output_time_ms)
+        shared_metrics["output_total_processing_time_ms"][:] = shared_metrics["output_total_processing_time_ms"][-N:]
 
         input_queue.task_done()
 

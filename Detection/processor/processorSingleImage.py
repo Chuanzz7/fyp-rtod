@@ -25,7 +25,7 @@ class SingleImageProcessor:
 
         # Initialize components
         self.inference_engine = InferenceEngine()
-        self.ocr_processor = OCRProcessor()
+        self.ocr_processor = OCRProcessor(warmup=True)
         self.result_assembler = ResultAssembler()
 
         print("Single image processor initialized")

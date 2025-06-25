@@ -185,7 +185,7 @@ class TrackingManager:
 class OCRProcessor:
     """Optimized OCR processor for product text detection (bottles, packages, etc.)"""
 
-    def __init__(self):
+    def __init__(self, warmup: bool = True):
         self.ocr = PaddleOCR(
             # Core model settings
             det_model_dir=None,  # Use default v5 detection model
@@ -231,15 +231,86 @@ class OCRProcessor:
             drop_score=0.3,  # Lower score threshold for keeping results (default: 0.5)
         )
 
+        self.is_warmed_up = False
+
+        # Perform warm-up by default
+        if warmup:
+            self.warmup()
+
+    def warmup(self, num_warmup_runs: int = 3):
+        """
+        Warm up the OCR models to avoid cold start delays.
+
+        Args:
+            num_warmup_runs: Number of warm-up inference runs
+        """
+        print("🔥 Warming up OCR models...")
+        warmup_start = time.perf_counter()
+
+        # Create different sized dummy images to warm up all model components
+        dummy_images = [
+            self._create_dummy_image(320, 240),  # Small image
+            self._create_dummy_image(640, 480),  # Medium image
+            self._create_dummy_image(800, 600),  # Large image
+        ]
+
+        for i in range(num_warmup_runs):
+            for j, dummy_img in enumerate(dummy_images):
+                try:
+                    # Warm up with different configurations
+                    _ = self.ocr.ocr(
+                        dummy_img,
+                        det=True,
+                        cls=True,
+                    )
+                    print(f"  ▸ Warmup run {i + 1}/{num_warmup_runs}, image {j + 1}/{len(dummy_images)} completed")
+                except Exception as e:
+                    print(f"  ⚠️  Warmup warning: {e}")
+
+        warmup_end = time.perf_counter()
+        warmup_time = (warmup_end - warmup_start) * 1000
+        print(f"✅ OCR models warmed up in {warmup_time:.1f} ms")
+        self.is_warmed_up = True
+
+    def _create_dummy_image(self, width: int, height: int) -> np.ndarray:
+        """Create a dummy image with some text for warm-up"""
+        # Create white background
+        img = np.ones((height, width, 3), dtype=np.uint8) * 255
+
+        # Add some dummy text using OpenCV
+        font = cv2.FONT_HERSHEY_SIMPLEX
+        font_scale = 1.0
+        color = (0, 0, 0)  # Black text
+        thickness = 2
+
+        # Add text at different positions
+        texts = ["PRODUCT", "LABEL", "TEXT", "123"]
+        y_positions = [height // 4, height // 2, 3 * height // 4, height - 50]
+
+        for text, y_pos in zip(texts, y_positions):
+            if y_pos > 0 and y_pos < height:
+                cv2.putText(img, text, (50, y_pos), font, font_scale, color, thickness)
+
+        return img
+
+    def ensure_warmed_up(self):
+        """Ensure the model is warmed up before processing"""
+        if not self.is_warmed_up:
+            print("⚠️  Model not warmed up, warming up now...")
+            self.warmup()
+
     def process_crops(self, crops: List[np.ndarray]) -> List:
         """Process multiple image crops with OCR - optimized for products"""
         if not crops:
             return []
 
+        # Ensure model is warmed up
+        self.ensure_warmed_up()
 
         # Process with optimized parameters for product text
         results = []
-        for crop in crops:
+        for i, crop in enumerate(crops):
+            # print(f"  ▸ Processing crop {i + 1}/{len(crops)}")
             # Preprocess crop for better OCR
             processed_crop = self._preprocess_crop(crop)
             result = self.ocr.ocr(
@@ -254,7 +325,9 @@ class OCRProcessor:
 
     def _preprocess_crop(self, crop: np.ndarray) -> np.ndarray:
         """Preprocess image crop for better OCR on products"""
-        import cv2
+        # Validate input
+        if crop.size == 0:
+            raise ValueError("Empty crop provided")
 
         # Convert to grayscale if needed
         if len(crop.shape) == 3:
@@ -267,15 +340,15 @@ class OCRProcessor:
         enhanced = clahe.apply(gray)
 
         # Convert back to BGR for PaddleOCR
-        if len(crop.shape) == 3:
-            return cv2.cvtColor(enhanced, cv2.COLOR_GRAY2BGR)
-        else:
-            return cv2.cvtColor(enhanced, cv2.COLOR_GRAY2BGR)
+        return cv2.cvtColor(enhanced, cv2.COLOR_GRAY2BGR)
 
     def process_single_crop(self, crop: np.ndarray) -> List[Dict]:
         """Process single image crop with OCR - optimized for product text"""
         if crop.size == 0:
             return []
+
+        # Ensure model is warmed up
+        self.ensure_warmed_up()
 
         t_start = time.perf_counter()
 
@@ -309,6 +382,31 @@ class OCRProcessor:
                             })
 
         return filtered_ocr
+
+    def process_crops_dict(self, crops_dict: Dict[int, np.ndarray]) -> Dict[int, List]:
+        """
+        Processes a dictionary of crops keyed by track_id and returns a
+        dictionary of OCR results with the same track_id keys.
+        """
+        if not crops_dict:
+            return {}
+
+        self.ensure_warmed_up()
+
+        # Prepare lists for batch processing while keeping track of original IDs
+        track_ids = list(crops_dict.keys())
+        crops_list = [crops_dict[tid] for tid in track_ids]
+
+        # Use the batch processing capability of PaddleOCR if available,
+        # otherwise iterate. Iteration is safer and shown here.
+        results_dict = {}
+        for track_id, crop in crops_dict.items():
+            processed_crop = self._preprocess_crop(crop)
+            # The result from ocr() is a list of lines for this single crop
+            ocr_lines = self.ocr.ocr(processed_crop, det=True, cls=True)
+            results_dict[track_id] = ocr_lines
+
+        return results_dict
 
 
 class ObjectCache:
@@ -348,7 +446,7 @@ class ObjectCache:
             self.cache[track_id]["ocr_processed"] = True
             print(f"  ▸ OCR saved for track {track_id}: {len(ocr_results)} results")
 
-    def needs_ocr(self, track_id: int, min_frames: int = 2) -> bool:
+    def needs_ocr(self, track_id: int, min_frames: int = 5) -> bool:
         """Check if OCR processing is needed for this track, and has survived min_frames"""
         if track_id not in self.cache:
             return False  # Don't OCR unknown tracks!
@@ -374,7 +472,7 @@ class ObjectCache:
 
         for oid in remove_ids:
             del self.cache[oid]
-            print(f"  ▸ Removed old track {oid} from cache")
+            # print(f"  ▸ Removed old track {oid} from cache")
 
 
 class CropExtractor:
@@ -396,6 +494,23 @@ class CropExtractor:
                 track_ids_needing_ocr.append(track_id)
 
         return crops, crop_metadata, track_ids_needing_ocr
+
+    @staticmethod
+    def extract_crops_as_dict(img: np.ndarray, track_info: List[Tuple], object_cache: ObjectCache,
+                              min_frames: int = 5) -> Dict[int, np.ndarray]:
+        """
+        Extracts crops for objects needing OCR and returns them in a dictionary
+        keyed by their track_id. This prevents state mismatch errors.
+        """
+        crops_to_process = {}
+        for x1, y1, x2, y2, track_id, class_name, score in track_info:
+            if object_cache.needs_ocr(track_id, min_frames=min_frames):
+                crop = img[y1:y2, x1:x2]
+                if crop.size == 0:
+                    continue
+                # Directly associate the crop with its track_id
+                crops_to_process[track_id] = crop
+        return crops_to_process
 
 
 class ResultAssembler:

@@ -1,3 +1,4 @@
+import re
 import uuid
 from contextlib import asynccontextmanager
 from pathlib import Path
@@ -115,6 +116,8 @@ async def create_product(
     # Generate product code
     product_code = await generate_product_code(db)
 
+    ocr_normalized = re.sub(r'\s+', '', ocr).lower()
+
     # Create product data
     product_data = {
         "code": product_code,
@@ -125,6 +128,7 @@ async def create_product(
         "quantity": quantity,
         "image": image_filename,
         "ocr": ocr,
+        "ocr_normalized": ocr_normalized,
         "inventoryStatus": inventoryStatus
     }
 
@@ -167,6 +171,7 @@ async def update_product(
         update_data["quantity"] = quantity
     if ocr is not None:
         update_data["ocr"] = ocr
+        update_data["ocr_normalized"] = re.sub(r'\s+', '', ocr).lower()
     if inventoryStatus is not None:
         update_data["inventoryStatus"] = inventoryStatus
 
@@ -214,18 +219,23 @@ async def fuzzy_product_lookup(
         ocr: str = Body(...),
         db: AsyncSession = Depends(get_db)
 ):
+    clean_ocr = re.sub(r'\s+', '', ocr).lower()
+
+    # The query is now much simpler and directly uses the indexed column
     query = text("""
-                 SELECT *, similarity(ocr, :ocr) AS sim
+                 SELECT *, similarity(ocr_normalized, :clean_ocr) AS sim
                  FROM products
-                 WHERE ocr % :ocr
-          AND category = :category
+                 WHERE ocr_normalized % :clean_ocr
+                   AND category = :category
                  ORDER BY sim DESC
                      LIMIT 1
                  """)
-    result = await db.execute(query, {"ocr": ocr, "category": category})
+    result = await db.execute(query, {"clean_ocr": clean_ocr, "category": category})
     row = result.first()
+
     if not row:
         raise HTTPException(status_code=404, detail="No similar product found")
+
     product = dict(row._mapping)
     product["confidence"] = float(product.pop("sim"))
     return product

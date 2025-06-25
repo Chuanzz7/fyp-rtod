@@ -10,14 +10,15 @@ from Detection.helper.imageProcessingHelper import GPUBufferManager, InferenceEn
     ObjectCache, decode_frame, DetectionProcessor, CropExtractor, ResultAssembler
 
 
-def processor_tensor_main(frame_input_queue: Queue, output_queue: Queue):
+def processor_tensor_main(frame_input_queue: Queue, output_queue: Queue, shared_metrics):
     """Main processing function with refactored components - ORIGINAL QUEUE-BASED PIPELINE"""
     # Initialize components
     GPUBufferManager.initialize_buffers()
     inference_engine = InferenceEngine()
     tracking_manager = TrackingManager()
-    ocr_processor = OCRProcessor()
+    ocr_processor = OCRProcessor(warmup=True)
     object_cache = ObjectCache()
+    N = 120  # or any number of frames you want to keep
 
     print("All components initialized, waiting for frames...")
 
@@ -26,6 +27,7 @@ def processor_tensor_main(frame_input_queue: Queue, output_queue: Queue):
         try:
             frame_bytes = frame_input_queue.get(timeout=1)
         except queue.Empty:
+            object_cache.cleanup_old_tracks(frame_id, 1)
             continue
 
         processor_start = time.perf_counter()
@@ -49,17 +51,31 @@ def processor_tensor_main(frame_input_queue: Queue, output_queue: Queue):
             img, track_info, object_cache, min_frames=4
         )
 
-        # Process OCR only for new objects
-        if crops:
-            t_start = time.perf_counter()
-            # print(f"  ▸ Processing OCR for {len(crops)} new objects")
-            ocr_results = ocr_processor.process_crops(crops)
-            t_end = time.perf_counter()
+        track_info_map = {ti[4]: ti for ti in track_info}  # ti[4] is the track_id
 
-            # Update cache with OCR results
-            for (x1, y1, x2, y2, track_id, class_name, score), ocr_lines in zip(crop_metadata, ocr_results):
-                filtered_ocr = OCRProcessor.filter_ocr_results(ocr_lines)
-                object_cache.update_object(track_id, (x1, y1, x2, y2), frame_id, class_name, filtered_ocr)
+        crops_to_process = CropExtractor.extract_crops_as_dict(
+            img, track_info, object_cache, min_frames=4
+        )
+
+        # 2. Process OCR only if there are crops
+        if crops_to_process:
+            ocr_start = time.perf_counter()
+            # The result is a dictionary {track_id: ocr_result}
+            ocr_results_dict = ocr_processor.process_crops_dict(crops_to_process)
+            ocr_end = time.perf_counter()
+
+            shared_metrics.setdefault("ocr_time_ms", []).append((ocr_end - ocr_start) * 1000)
+            shared_metrics["ocr_time_ms"][:] = shared_metrics["ocr_time_ms"][-N:]
+
+            # 3. Update cache using the correctly-keyed OCR results
+            for track_id, ocr_lines in ocr_results_dict.items():
+                # Check if the track still exists in the current frame
+                if track_id in track_info_map:
+                    # Get the most recent bounding box for this track_id
+                    x1, y1, x2, y2, _, class_name, _ = track_info_map[track_id]
+                    filtered_ocr = OCRProcessor.filter_ocr_results(ocr_lines)
+                    # Update cache with OCR. The box update is for the current frame.
+                    object_cache.update_object(track_id, (x1, y1, x2, y2), frame_id, class_name, filtered_ocr)
 
         # Update cache for all tracked objects (even those without new OCR)
         for x1, y1, x2, y2, track_id, class_name, score in track_info:
@@ -88,11 +104,21 @@ def processor_tensor_main(frame_input_queue: Queue, output_queue: Queue):
         }
 
         processor_end = time.perf_counter()
-        # print(f"  ▸ Optimized Inference: {inference_time:.1f} ms")
-        # print(f"  ▸ SORT & Cache: {(sort_end - sort_start) * 1000:.1f} ms")
-        # print(f"  ▸ OCR (batch): {(t_end - t_start) * 1000:.1f} ms")
-        # print(f"  ▸ Draw: {(draw_end - draw_start) * 1000:.1f} ms")
-        # print(f"Total Processing: {(processor_end - processor_start) * 1000:.1f} ms")
-
         output_queue.put(data)
         frame_id += 1
+
+        # D-Fine Inference
+        shared_metrics.setdefault("dfine_inference_time_ms", []).append(inference_time)
+        shared_metrics["dfine_inference_time_ms"][:] = shared_metrics["dfine_inference_time_ms"][-N:]
+
+        # SORT & Cache
+        shared_metrics.setdefault("sort_and_cache_time_ms", []).append((sort_end - sort_start) * 1000)
+        shared_metrics["sort_and_cache_time_ms"][:] = shared_metrics["sort_and_cache_time_ms"][-N:]
+
+        # Draw time
+        shared_metrics.setdefault("draw_time_ms", []).append((draw_end - draw_start) * 1000)
+        shared_metrics["draw_time_ms"][:] = shared_metrics["draw_time_ms"][-N:]
+
+        # Total processing time
+        shared_metrics.setdefault("total_processing_time_ms", []).append((processor_end - processor_start) * 1000)
+        shared_metrics["total_processing_time_ms"][:] = shared_metrics["total_processing_time_ms"][-N:]

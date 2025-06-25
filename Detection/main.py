@@ -7,8 +7,8 @@ from multiprocessing import Process
 import uvicorn
 
 from Detection import api
-from Detection.processor import processorTensor, processorOutput
 from Detection.helper.dataClass import COCO_CLASSES
+from Detection.processor import processorTensor, processorOutput
 
 os.environ["KMP_DUPLICATE_LIB_OK"] = "TRUE"
 
@@ -26,11 +26,6 @@ if __name__ == "__main__":
 
     # Create shared configuration dictionary with assigned_regions
     shared_config = manager.dict({
-        'iou_threshold': 0.1,
-        'api_id_max_age': 100,
-        'jpeg_quality': 85,
-        'fps_update_interval': 1.0,
-        'font_size': 28,
         'assigned_regions': manager.list([
             {
                 "label": COCO_CLASSES[39][1],  # user label, could be from OCR or model class
@@ -39,16 +34,28 @@ if __name__ == "__main__":
             },
         ])
     })
+    shared_metrics = manager.dict()
+    shared_metrics["upload_frame_qps"] = manager.list()
+    shared_metrics["dfine_inference_time_ms"] = manager.list()
+    shared_metrics["ocr_time_ms"] = manager.list()
+    shared_metrics["total_processing_time_ms"] = manager.list()
+    shared_metrics["output_panel_time_ms"] = manager.list()
+    shared_metrics["output_api_time_ms"] = manager.list()
+    shared_metrics["output_draw_time_ms"] = manager.list()
+    shared_metrics["output_panel_enrich_time_ms"] = manager.list()
+    shared_metrics["output_total_processing_time_ms"] = manager.list()
+    shared_metrics["output_fps"] = manager.list()
 
-    p1 = Process(target=processorTensor.processor_tensor_main, args=(frame_input_queue, inference_output_queue))
+    p1 = Process(target=processorTensor.processor_tensor_main,
+                 args=(frame_input_queue, inference_output_queue, shared_metrics))
     p2 = Process(target=processorOutput.process_output_main,
-                 args=(inference_output_queue, mjpeg_frame_queue, shared_config))
+                 args=(inference_output_queue, mjpeg_frame_queue, shared_config, shared_metrics))
 
     p1.start()
     p2.start()
 
     # Run API and inject queues and shared config
-    api.inject_queues(frame_input_queue, mjpeg_frame_queue, shared_config)
+    api.inject_queues(frame_input_queue, mjpeg_frame_queue, shared_config, shared_metrics)
 
     # Start Uvicorn in a thread so the main process isn't blocked
     uvicorn_thread = threading.Thread(target=run_uvicorn, daemon=True)
