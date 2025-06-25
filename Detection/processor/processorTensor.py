@@ -33,7 +33,9 @@ def processor_tensor_main(frame_input_queue: Queue, output_queue: Queue, shared_
         processor_start = time.perf_counter()
 
         # Decode frame
+        decode_start = time.perf_counter()
         img = decode_frame(frame_bytes)
+        decode_end = time.perf_counter()
 
         # Run inference
         output, inference_time = inference_engine.run_inference(img)
@@ -106,6 +108,10 @@ def processor_tensor_main(frame_input_queue: Queue, output_queue: Queue, shared_
         processor_end = time.perf_counter()
         output_queue.put(data)
         frame_id += 1
+
+        # Decode
+        shared_metrics.setdefault("decode_time_ms", []).append((decode_end - decode_start) * 1000)
+        shared_metrics["decode_time_ms"][:] = shared_metrics["decode_time_ms"][-N:]
 
         # D-Fine Inference
         shared_metrics.setdefault("dfine_inference_time_ms", []).append(inference_time)

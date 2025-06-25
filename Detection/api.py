@@ -18,7 +18,7 @@ origins = [
 
 app = FastAPI()
 app.state.upload_counter = 0
-app.state.last_logged = time.time()
+app.state.last_logged = time.perf_counter()
 app.add_middleware(
     CORSMiddleware,
     allow_origins=origins,  # or ["*"] for all
@@ -65,7 +65,7 @@ def inject_queues(frame_queue, mjpeg_queue, shared_config, shared_metrics):
     app.state.shared_metrics = shared_metrics
 
 
-async def qps_logger(interval=60):
+async def qps_logger(interval=1):
     while True:
         await asyncio.sleep(interval)
         count = app.state.upload_counter

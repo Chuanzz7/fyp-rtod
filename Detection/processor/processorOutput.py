@@ -14,7 +14,7 @@ api_results = dict()  # {track_id: {"code": str, "confidence": float, "timestamp
 
 
 def process_output_main(input_queue: Queue, mjpeg_frame_queue: Queue, shared_config, shared_metrics):
-    last_time = time.time()
+    last_time = time.perf_counter()
     frame_count = 0
     fps = 0
     N = 120  # keep last 120 samples for dashboard
@@ -34,14 +34,14 @@ def process_output_main(input_queue: Queue, mjpeg_frame_queue: Queue, shared_con
         panel_start = time.perf_counter()
         checked_panel_rows = check_wrong_placement(
             data["panel_rows"], list(shared_config.get('assigned_regions', [])),
-            iou_threshold=shared_config.get('iou_threshold', 0.1)
+            iou_threshold=0.1
         )
         panel_end = time.perf_counter()
 
         # ============ 2. Async API calls (timing optional)
         api_start = time.perf_counter()
         asyncio.run(
-            call_product_api_from_panel(checked_panel_rows, frame_count, shared_config.get('api_id_max_age', 100)))
+            call_product_api_from_panel(checked_panel_rows, frame_count, 100))
         api_end = time.perf_counter()
 
         # ============ 3. Panel result enrichment
@@ -62,9 +62,9 @@ def process_output_main(input_queue: Queue, mjpeg_frame_queue: Queue, shared_con
 
         # ============ 5. Output FPS
         frame_count += 1
-        now = time.time()
+        now = time.perf_counter()
         elapsed = now - last_time
-        if elapsed >= 1.0:  # Update FPS every second
+        if elapsed >= 1:  # Update FPS every second
             fps = frame_count / elapsed
             frame_count = 0
             last_time = now
@@ -108,7 +108,7 @@ def process_output_main(input_queue: Queue, mjpeg_frame_queue: Queue, shared_con
 def add_api_results_to_panel(panel_rows):
     """Add API results to panel rows for display"""
     enriched_rows = []
-    current_time = time.time()
+    current_time = time.perf_counter()
 
     for row in panel_rows:
         track_id = row["object_id"]
@@ -282,7 +282,7 @@ async def fetch_product_id_async(class_name, ocr_text, track_id):
                 api_results[track_id] = {
                     "code": code,
                     "confidence": confidence,
-                    "timestamp": time.time()
+                    "timestamp": time.perf_counter()
                 }
 
                 print(f"[API] {class_name} + {ocr_text} → ProductID: {code}, conf: {confidence}")

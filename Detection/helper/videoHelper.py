@@ -17,85 +17,101 @@ LOW_CONF_COLOR = (255, 100, 100)
 API_COLOR = (255, 150, 255)  # Magenta for API results
 
 
-def build_detection_panel(results, height, region_statuses=None):
-    """
-    Return an RGB PIL image (PANEL_W × height) with:
-    • Class name and detector confidence (large font)
-    • Optional OCR text and its confidence (smaller font, colored)
-    • API results (if available)
-    """
+def get_confidence_color(confidence):
+    """Returns the color based on a confidence score."""
+    if confidence > 0.8:
+        return HIGH_CONF_COLOR
+    if confidence > 0.5:
+        return MID_CONF_COLOR
+    return LOW_CONF_COLOR
 
+
+def get_status_color(status):
+    """Returns the color based on a region status string."""
+    if status == "Correct Region":
+        return (110, 255, 110)  # green
+    if status.startswith("Wrong Region"):
+        return (255, 100, 100)  # red
+    return (255, 210, 80)  # yellow (Unassigned or other)
+
+
+def build_detection_panel(results, height):
+    """
+    Return an optimized RGB PIL image with detection results.
+    """
     panel = Image.new("RGB", (PANEL_W, height), BG_COLOR)
     draw = ImageDraw.Draw(panel)
 
-    y = PADDING_Y
-    for r in results:
-        # Confidence color
-        conf = r['confidence']
-        if conf > 0.8:
-            conf_color = HIGH_CONF_COLOR
-        elif conf > 0.5:
-            conf_color = MID_CONF_COLOR
-        else:
-            conf_color = LOW_CONF_COLOR
+    # --- Pre-calculate font metrics ---
+    # Use getbbox to get more accurate line heights than .size
+    primary_line_height = PRIMARY_FONT.getbbox("Tg")[3] + LINE_SPACING
+    secondary_line_height = SECONDARY_FONT.getbbox("Tg")[3] + LINE_SPACING // 2
 
-        # ── line-1 : Detector output with Track ID ──
+    y = PADDING_Y
+    panel_bottom_margin = height - PADDING_Y
+
+    # --- Drawing Helper ---
+    def draw_line(text, font, color, indent=0, line_height=primary_line_height):
+        nonlocal y
+        if y + line_height > panel_bottom_margin:
+            return False  # Not enough space to draw
+
+        draw.text((PADDING_X + indent, y), text, fill=color, font=font)
+        y += line_height
+        return True  # Successfully drawn
+
+    # --- Main Loop ---
+    for r in results:
+        # ── Line 1: Detector output ──
+        conf = r['confidence']
         track_id = r.get('object_id', 'N/A')
         label = f"ID:{track_id:<3} {r['class_name']:<12} {conf * 100:5.1f}%"
-        draw.text((PADDING_X, y), label, fill=conf_color, font=PRIMARY_FONT)
-        y += PRIMARY_FONT.size + LINE_SPACING
+        if not draw_line(label, PRIMARY_FONT, get_confidence_color(conf)):
+            break
 
-        # ── line-2: Status results (if available) ──
+        # ── Line 2: Status results ──
         status = r.get("region_status", "Unassigned")
-        if status == "Correct Region":
-            status_color = (110, 255, 110)  # green
-        elif status.startswith("Wrong Region"):
-            status_color = (255, 100, 100)  # red
-        else:
-            status_color = (255, 210, 80)  # yellow
+        if not draw_line(f"{status}", PRIMARY_FONT, get_status_color(status)):
+            break
 
-        label = f"{status}"
-        draw.text((PADDING_X, y), label, fill=status_color, font=PRIMARY_FONT)
-        y += PRIMARY_FONT.size + LINE_SPACING
-
-        # ── line-3: API results (if available) ──
-        if r.get("api_result"):
-            api_data = r["api_result"]
+        # ── Line 3: API results ──
+        if api_data := r.get("api_result"):  # Walrus operator for cleaner code
             code = api_data.get("code", "Unknown")
             api_conf = api_data.get("confidence", 0.0)
+            display_id = str(code)
+            if len(display_id) > 24:
+                display_id = display_id[:24] + '…'
 
-            # Truncate product ID if too long
-            max_chars = 24
-            display_id = (code[:max_chars] + '…') if len(str(code)) > max_chars else str(code)
             api_label = f"  API: {display_id} ({api_conf * 100:4.1f}%)"
-            draw.text((PADDING_X, y), api_label, fill=API_COLOR, font=SECONDARY_FONT)
-            y += SECONDARY_FONT.size + LINE_SPACING
+            if not draw_line(api_label, SECONDARY_FONT, API_COLOR, indent=0, line_height=secondary_line_height):
+                break
 
-        # ── line-4: OCR results (if available) ──
-        if r.get("ocr_results"):
-            for o in r["ocr_results"]:
-                # Safe key access with fallbacks
+        # ── Line 4: OCR results ──
+        if ocr_results := r.get("ocr_results"):
+            for o in ocr_results:
                 ocr_text = o.get('ocr_text', o.get('text', ''))
-                ocr_conf = o.get('ocr_conf', o.get('ocr_confidence', o.get('confidence', 0)))
+                if not ocr_text:
+                    continue
 
-                if ocr_text:  # Only display if we have text
-                    # Truncate with ellipsis
-                    max_chars = 28
-                    ocr_text = (ocr_text[:max_chars] + '…') if len(ocr_text) > max_chars else ocr_text
-                    ocr_label = f"  -> {ocr_text} ({ocr_conf * 100:4.1f}%)"
-                    draw.text((PADDING_X + 12, y), ocr_label, fill=OCR_COLOR, font=SECONDARY_FONT)
-                    y += SECONDARY_FONT.size + LINE_SPACING // 2
-                    if y > height - PADDING_Y - 20:
-                        break
+                ocr_conf = o.get('ocr_conf', o.get('ocr_confidence', 0))
+                if len(ocr_text) > 28:
+                    ocr_text = ocr_text[:28] + '…'
 
-        # Gap before next detection
+                ocr_label = f"  -> {ocr_text} ({ocr_conf * 100:4.1f}%)"
+                if not draw_line(ocr_label, SECONDARY_FONT, OCR_COLOR, indent=12, line_height=secondary_line_height):
+                    # Set a flag to break the outer loop as well
+                    y = height
+                    break
+            if y >= height: break  # Break from the main results loop
+
         y += DETECTION_GAP
-        if y > height - PADDING_Y - 20:
+        if y >= panel_bottom_margin:
             break
 
     return panel
 
 
+# The side_by_side function is already optimal. No changes needed.
 def side_by_side(left: Image.Image, right: Image.Image) -> Image.Image:
     """Horizontally concat two PIL images of identical height."""
     dst = Image.new("RGB", (left.width + right.width, left.height))
