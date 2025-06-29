@@ -224,7 +224,6 @@ class OCRProcessor:
             # Output settings
             show_log=False,  # Set to True for debugging
             save_crop_res=False,  # Set to True if you want to save cropped regions
-            crop_res_save_dir="./output",  # Directory for saved crops
 
             # Advanced settings for curved/distorted text (bottles)
             use_space_char=True,  # Preserve spaces in text

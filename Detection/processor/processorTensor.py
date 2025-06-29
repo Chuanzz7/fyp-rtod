@@ -51,13 +51,13 @@ def processor_tensor_main(frame_input_queue: Queue, output_queue: Queue, shared_
         # Extract crops only for objects needing OCR
         sort_start = time.perf_counter()
         crops, crop_metadata, track_ids_needing_ocr = CropExtractor.extract_crops(
-            img, track_info, object_cache, min_frames=4
+            img, track_info, object_cache, min_frames=5
         )
 
         track_info_map = {ti[4]: ti for ti in track_info}  # ti[4] is the track_id
 
         crops_to_process = CropExtractor.extract_crops_as_dict(
-            img, track_info, object_cache, min_frames=4
+            img, track_info, object_cache, min_frames=5
         )
 
         # 2. Process OCR only if there are crops
@@ -95,7 +95,7 @@ def processor_tensor_main(frame_input_queue: Queue, output_queue: Queue, shared_
         # Draw results
         draw_start = time.perf_counter()
         labels, boxes, scores = output["labels"], output["boxes"], output["scores"]
-        np_img = drawHelper.draw(img, labels, boxes, scores, thrh=0.4)
+        np_img = drawHelper.draw(img, labels, boxes, scores, thrh=0.8)
         draw_end = time.perf_counter()
 
         # Assemble final output

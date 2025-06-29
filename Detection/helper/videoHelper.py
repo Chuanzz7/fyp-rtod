@@ -106,11 +106,10 @@ def build_detection_panel(results, height):
                 if not ocr_text:
                     continue
 
-                ocr_conf = o.get('ocr_conf', o.get('ocr_confidence', 0))
                 if len(ocr_text) > 28:
                     ocr_text = ocr_text[:28] + '…'
 
-                ocr_label = f"  -> {ocr_text} ({ocr_conf * 100:4.1f}%)"
+                ocr_label = f"  -> {ocr_text}"
                 if not draw_line(ocr_label, secondary_font, secondary_font_scale, secondary_thickness,
                                  OCR_COLOR, indent=12, line_height=secondary_line_height):
                     # Set a flag to break the outer loop as well
