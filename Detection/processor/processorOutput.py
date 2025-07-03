@@ -39,11 +39,14 @@ def process_output_main(input_queue: Queue, mjpeg_frame_queue: Queue, shared_con
             assigned_regions = list(shared_config.get('assigned_regions', []))
 
             # 1. Placement Check (CPU-bound, fast)
+            draw_start_time = time.perf_counter()
             checked_panel_rows = check_wrong_placement(
                 data["panel_rows"], assigned_regions, iou_threshold=0.1
             )
+            update_metric(shared_metrics, "output_placement_time_ms", (time.perf_counter() - draw_start_time) * 1000)
 
             # 2. Asynchronous API Calls (Non-blocking)
+            api_start = time.perf_counter()
             # This is now very fast. It just queues tasks for the background thread.
             # We use the actual frame_id from the data packet.
             api_manager.process_and_call_api(checked_panel_rows, frame_id)
@@ -51,6 +54,7 @@ def process_output_main(input_queue: Queue, mjpeg_frame_queue: Queue, shared_con
             # 3. Enrich panel data with the *current* API results
             current_api_results = api_manager.get_api_results()
             enriched_panel_rows = enrich_rows_with_api_results(checked_panel_rows, current_api_results)
+            update_metric(shared_metrics, "output_api_time_ms", (time.perf_counter() - api_start) * 1000)
 
             # 4. Draw, build panel, and composite frame
             draw_start_time = time.perf_counter()
@@ -79,13 +83,13 @@ def process_output_main(input_queue: Queue, mjpeg_frame_queue: Queue, shared_con
             frame_counter += 1
             now = time.perf_counter()
             elapsed = now - last_fps_time
+            update_metric(shared_metrics, "output_total_processing_time_ms", (now - stage_start_time) * 1000)
             if elapsed >= 1.0:
                 fps = frame_counter / elapsed
                 update_metric(shared_metrics, "output_fps", fps)
                 frame_counter = 0
                 last_fps_time = now
 
-            update_metric(shared_metrics, "output_total_processing_time_ms", (now - stage_start_time) * 1000)
 
     except (KeyboardInterrupt, SystemExit):
         print("Process output main shutting down...")
