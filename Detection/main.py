@@ -43,6 +43,7 @@ if __name__ == "__main__":
     shared_metrics["ocr_time_ms"] = manager.list()
     shared_metrics["total_processing_time_ms"] = manager.list()
     shared_metrics["output_panel_time_ms"] = manager.list()
+    shared_metrics["output_placement_time_ms"] = manager.list()
     shared_metrics["output_api_time_ms"] = manager.list()
     shared_metrics["output_draw_time_ms"] = manager.list()
     shared_metrics["output_encode_time_ms"] = manager.list()

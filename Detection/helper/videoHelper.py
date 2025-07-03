@@ -73,7 +73,7 @@ def build_detection_panel(enriched_rows: List[Dict[str, Any]], height: int) -> n
 
         # Lines 4+: OCR Results (if present)
         if ocr_results := row.get("ocr_results"):
-            for ocr in ocr_results[:2]:  # Limit to 2 OCR lines for space
+            for ocr in ocr_results:
                 ocr_text = ocr.get('text', '')[:28]
                 if not ocr_text: continue
                 current_y += 18

@@ -1,14 +1,6 @@
-from collections import deque
-from typing import Dict
-
-N_METRICS = 120  # Number of metric samples to keep
-
-
-def update_metric(metrics_dict: Dict, key: str, value: float, max_len: int = N_METRICS):
-    """
-    Helper to initialize and update a metric in the shared dictionary
-    using a deque for efficiency.
-    """
-    if key not in metrics_dict:
-        metrics_dict[key] = deque(maxlen=max_len)
-    metrics_dict[key].append(value)
+def update_metric(shared_metrics, key: str, value: float):
+    arr = shared_metrics[key]
+    arr.append(value)
+    # If we've exceeded maxlen, remove from the front
+    if len(arr) > 120:
+        del arr[0:len(arr) - 120]
