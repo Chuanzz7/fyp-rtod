@@ -1,12 +1,13 @@
-import asyncio
 import queue
 import time
 from multiprocessing import Queue
+from typing import List, Dict
 
 import cv2
-import numpy as np
 
 from Detection.helper import videoHelper
+from Detection.helper.apiHelper import APIManager
+from Detection.helper.metricHelper import update_metric
 
 api_called_ids = set()
 api_id_last_seen = dict()
@@ -14,106 +15,93 @@ api_results = dict()  # {track_id: {"code": str, "confidence": float, "timestamp
 
 
 def process_output_main(input_queue: Queue, mjpeg_frame_queue: Queue, shared_config, shared_metrics):
-    last_time = time.perf_counter()
-    frame_count = 0
-    fps = 0
-    N = 120  # keep last 120 samples for dashboard
+    """
+    Main processing loop for handling detection outputs, calling APIs,
+    and generating the final video stream frame.
+    """
+    # Instantiate the APIManager ONCE before the loop
+    api_manager = APIManager(api_id_max_age=150)  # Increased age to ~5 seconds at 30fps
 
-    while True:
-        try:
-            data = input_queue.get(timeout=1)
-        except queue.Empty:
-            api_called_ids.clear()
-            api_id_last_seen.clear()
-            api_results.clear()
-            continue
+    # For FPS calculation
+    last_fps_time = time.perf_counter()
+    frame_counter = 0
 
-        stage_start = time.perf_counter()
+    try:
+        while True:
+            try:
+                # This is the data structure you provided
+                data = input_queue.get(timeout=1)
+            except queue.Empty:
+                continue
 
-        # ============ 1. Build panel rows (placement check)
-        panel_start = time.perf_counter()
-        checked_panel_rows = check_wrong_placement(
-            data["panel_rows"], list(shared_config.get('assigned_regions', [])),
-            iou_threshold=0.1
-        )
-        panel_end = time.perf_counter()
+            stage_start_time = time.perf_counter()
+            frame_id = data["frame_id"]
+            assigned_regions = list(shared_config.get('assigned_regions', []))
 
-        # ============ 2. Async API calls (timing optional)
-        api_start = time.perf_counter()
-        asyncio.run(
-            call_product_api_from_panel(checked_panel_rows, frame_count, 100))
-        api_end = time.perf_counter()
+            # 1. Placement Check (CPU-bound, fast)
+            checked_panel_rows = check_wrong_placement(
+                data["panel_rows"], assigned_regions, iou_threshold=0.1
+            )
 
-        # ============ 3. Panel result enrichment
-        enrich_start = time.perf_counter()
-        enriched_panel_rows = add_api_results_to_panel(checked_panel_rows)
-        enrich_end = time.perf_counter()
+            # 2. Asynchronous API Calls (Non-blocking)
+            # This is now very fast. It just queues tasks for the background thread.
+            # We use the actual frame_id from the data packet.
+            api_manager.process_and_call_api(checked_panel_rows, frame_id)
 
-        # ============ 4. Draw boxes and composite
-        draw_start = time.perf_counter()
-        np_img_with_boxes = videoHelper.draw_assigned_regions_on_frame(data["np_img"],
-                                                                       list(shared_config.get('assigned_regions', [])))
-        panel = videoHelper.build_detection_panel(enriched_panel_rows, data["np_img"].shape[0], )
-        composite = videoHelper.side_by_side(np_img_with_boxes, panel)
-        encode_param = [cv2.IMWRITE_JPEG_QUALITY, 85]
-        success, encoded_image = cv2.imencode('.jpg', composite, encode_param)
-        jpeg_bytes = encoded_image.tobytes()
-        draw_end = time.perf_counter()
+            # 3. Enrich panel data with the *current* API results
+            current_api_results = api_manager.get_api_results()
+            enriched_panel_rows = enrich_rows_with_api_results(checked_panel_rows, current_api_results)
 
-        # ============ 5. Output FPS
-        frame_count += 1
-        now = time.perf_counter()
-        elapsed = now - last_time
-        if elapsed >= 1:  # Update FPS every second
-            fps = frame_count / elapsed
-            frame_count = 0
-            last_time = now
-            shared_metrics.setdefault("output_fps", []).append(fps)
-            shared_metrics["output_fps"][:] = shared_metrics["output_fps"][-N:]
+            # 4. Draw, build panel, and composite frame
+            draw_start_time = time.perf_counter()
+            np_img_with_boxes = videoHelper.draw_assigned_regions_on_frame(
+                data["np_img"], assigned_regions
+            )
+            panel = videoHelper.build_detection_panel(enriched_panel_rows, data["np_img"].shape[0])
+            composite = videoHelper.side_by_side(np_img_with_boxes, panel)
+            update_metric(shared_metrics, "output_draw_time_ms", (time.perf_counter() - draw_start_time) * 1000)
 
-        # ============ 6. Total processing time
-        stage_end = time.perf_counter()
+            # 5. Encode to JPEG
+            encode_start_time = time.perf_counter()
+            success, encoded_image = cv2.imencode('.jpg', composite, [cv2.IMWRITE_JPEG_QUALITY, 85])
+            if not success:
+                continue
+            jpeg_bytes = encoded_image.tobytes()
+            update_metric(shared_metrics, "output_encode_time_ms", (time.perf_counter() - encode_start_time) * 1000)
 
-        # ============ 7. Send output
-        try:
-            mjpeg_frame_queue.put_nowait(jpeg_bytes)
-        except queue.Full:
-            pass
+            # 6. Send frame to MJPEG server
+            try:
+                mjpeg_frame_queue.put_nowait(jpeg_bytes)
+            except queue.Full:
+                pass  # Drop frames if the consumer is backed up
 
-        panel_time_ms = (panel_end - panel_start) * 1000
-        shared_metrics.setdefault("output_panel_time_ms", []).append(panel_time_ms)
-        shared_metrics["output_panel_time_ms"][:] = shared_metrics["output_panel_time_ms"][-N:]
-        api_time_ms = (api_end - api_start) * 1000
-        shared_metrics.setdefault("output_api_time_ms", []).append(api_time_ms)
-        shared_metrics["output_api_time_ms"][:] = shared_metrics["output_api_time_ms"][-N:]
-        draw_time_ms = (draw_end - draw_start) * 1000
-        shared_metrics.setdefault("output_draw_time_ms", []).append(draw_time_ms)
-        shared_metrics["output_draw_time_ms"][:] = shared_metrics["output_draw_time_ms"][-N:]
-        enrich_time_ms = (enrich_end - enrich_start) * 1000
-        shared_metrics.setdefault("output_panel_enrich_time_ms", []).append(enrich_time_ms)
-        shared_metrics["output_panel_enrich_time_ms"][:] = shared_metrics["output_panel_enrich_time_ms"][-N:]
-        total_output_time_ms = (stage_end - stage_start) * 1000
-        shared_metrics.setdefault("output_total_processing_time_ms", []).append(total_output_time_ms)
-        shared_metrics["output_total_processing_time_ms"][:] = shared_metrics["output_total_processing_time_ms"][-N:]
+            # 7. Calculate and update FPS
+            frame_counter += 1
+            now = time.perf_counter()
+            elapsed = now - last_fps_time
+            if elapsed >= 1.0:
+                fps = frame_counter / elapsed
+                update_metric(shared_metrics, "output_fps", fps)
+                frame_counter = 0
+                last_fps_time = now
 
-        input_queue.task_done()
+            update_metric(shared_metrics, "output_total_processing_time_ms", (now - stage_start_time) * 1000)
+
+    except (KeyboardInterrupt, SystemExit):
+        print("Process output main shutting down...")
+    finally:
+        # CRITICAL: Ensure the API manager is shut down gracefully
+        api_manager.shutdown()
 
 
-def add_api_results_to_panel(panel_rows):
-    """Add API results to panel rows for display"""
+def enrich_rows_with_api_results(panel_rows: List[Dict], api_results: Dict) -> List[Dict]:
+    """Pure function to add API results to panel data structures for display."""
     enriched_rows = []
-
     for row in panel_rows:
         track_id = row["object_id"]
         enriched_row = row.copy()
-
         if track_id in api_results:
-            api_data = api_results[track_id]
-            enriched_row["api_result"] = {
-                "code": api_data["code"],
-                "confidence": api_data["confidence"]
-            }
-
+            enriched_row["api_result"] = api_results[track_id]
         enriched_rows.append(enriched_row)
     return enriched_rows
 
@@ -210,58 +198,3 @@ def compute_iou(bbox1, bbox2):
     except Exception as e:
         print(f"Error computing IoU for {bbox1} and {bbox2}: {e}")
         return 0.0
-
-
-async def call_product_api_from_panel(panel_rows, frame_count, api_id_max_age=100):
-    tasks = []
-    current_frame_track_ids = set()
-    for row in panel_rows:
-        track_id = row["object_id"]
-        current_frame_track_ids.add(track_id)
-        if track_id in api_called_ids:
-            continue
-        ocr_results = row.get("ocr_results", [])
-        ocr_text = " ".join([r["text"] for r in ocr_results if "text" in r])
-        class_name = row["class_name"]
-        if ocr_text.strip():
-            tasks.append(fetch_product_id_async(class_name, ocr_text, track_id))
-            api_called_ids.add(track_id)
-        # Always update last seen for active IDs
-        api_id_last_seen[track_id] = frame_count
-
-    # Cleanup IDs not seen for > api_id_max_age frames
-    to_remove = [tid for tid, last_seen in api_id_last_seen.items()
-                 if frame_count - last_seen > api_id_max_age]
-    for tid in to_remove:
-        api_called_ids.discard(tid)
-        api_id_last_seen.pop(tid, None)
-        # Also cleanup API results
-        api_results.pop(tid, None)
-
-    if tasks:
-        await asyncio.gather(*tasks)
-
-
-async def fetch_product_id_async(class_name, ocr_text, track_id):
-    import httpx
-    url = "http://localhost:8001/api/product_lookup"
-    try:
-        async with httpx.AsyncClient(timeout=1.0) as client:
-            resp = await client.post(url, json={"category": class_name, "ocr": ocr_text})
-            if resp.status_code == 200:
-                data = resp.json()
-                code = data.get('code')
-                confidence = data.get('confidence', 0.0)
-
-                # Store the API result with timestamp
-                api_results[track_id] = {
-                    "code": code,
-                    "confidence": confidence,
-                    "timestamp": time.perf_counter()
-                }
-
-                print(f"[API] {class_name} + {ocr_text} → ProductID: {code}, conf: {confidence}")
-            else:
-                print(f"[API] Error {resp.status_code}: {resp.text}")
-    except Exception as e:
-        print(f"[API] Exception: {e}")

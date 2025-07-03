@@ -478,7 +478,7 @@ class CropExtractor:
     """Extracts image crops from tracked objects"""
 
     @staticmethod
-    def extract_crops(img: np.ndarray, track_info: List[Tuple], object_cache: ObjectCache, min_frames: int = 5):
+    def extract_crops(img: np.ndarray, track_info: List[Tuple], object_cache: ObjectCache, min_frames: int = 15):
         crops = []
         crop_metadata = []
         track_ids_needing_ocr = []
@@ -496,7 +496,7 @@ class CropExtractor:
 
     @staticmethod
     def extract_crops_as_dict(img: np.ndarray, track_info: List[Tuple], object_cache: ObjectCache,
-                              min_frames: int = 5) -> Dict[int, np.ndarray]:
+                              min_frames: int = 15) -> Dict[int, np.ndarray]:
         """
         Extracts crops for objects needing OCR and returns them in a dictionary
         keyed by their track_id. This prevents state mismatch errors.

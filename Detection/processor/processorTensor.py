@@ -3,12 +3,10 @@ import queue
 import time
 from multiprocessing import Queue
 
-from PIL import Image
-
-from DFINE.tools.inference.trt_inf import draw
 from Detection.helper import drawHelper
 from Detection.helper.imageProcessingHelper import GPUBufferManager, InferenceEngine, TrackingManager, OCRProcessor, \
     ObjectCache, decode_frame, DetectionProcessor, CropExtractor, ResultAssembler
+from Detection.helper.metricHelper import update_metric
 
 
 def processor_tensor_main(frame_input_queue: Queue, output_queue: Queue, shared_metrics):
@@ -51,13 +49,13 @@ def processor_tensor_main(frame_input_queue: Queue, output_queue: Queue, shared_
         # Extract crops only for objects needing OCR
         sort_start = time.perf_counter()
         crops, crop_metadata, track_ids_needing_ocr = CropExtractor.extract_crops(
-            img, track_info, object_cache, min_frames=5
+            img, track_info, object_cache
         )
 
         track_info_map = {ti[4]: ti for ti in track_info}  # ti[4] is the track_id
 
         crops_to_process = CropExtractor.extract_crops_as_dict(
-            img, track_info, object_cache, min_frames=5
+            img, track_info, object_cache
         )
 
         # 2. Process OCR only if there are crops
@@ -111,21 +109,16 @@ def processor_tensor_main(frame_input_queue: Queue, output_queue: Queue, shared_
         frame_id += 1
 
         # Decode
-        shared_metrics.setdefault("decode_time_ms", []).append((decode_end - decode_start) * 1000)
-        shared_metrics["decode_time_ms"][:] = shared_metrics["decode_time_ms"][-N:]
+        update_metric(shared_metrics, "decode_time_ms", (decode_end - decode_start) * 1000)
 
         # D-Fine Inference
-        shared_metrics.setdefault("dfine_inference_time_ms", []).append(inference_time)
-        shared_metrics["dfine_inference_time_ms"][:] = shared_metrics["dfine_inference_time_ms"][-N:]
+        update_metric(shared_metrics, "dfine_inference_time_ms", inference_time)
 
         # SORT & Cache
-        shared_metrics.setdefault("sort_and_cache_time_ms", []).append((sort_end - sort_start) * 1000)
-        shared_metrics["sort_and_cache_time_ms"][:] = shared_metrics["sort_and_cache_time_ms"][-N:]
+        update_metric(shared_metrics, "sort_and_cache_time_ms", (sort_end - sort_start) * 1000)
 
         # Draw time
-        shared_metrics.setdefault("draw_time_ms", []).append((draw_end - draw_start) * 1000)
-        shared_metrics["draw_time_ms"][:] = shared_metrics["draw_time_ms"][-N:]
+        update_metric(shared_metrics, "draw_time_ms", (draw_end - draw_start) * 1000)
 
         # Total processing time
-        shared_metrics.setdefault("total_processing_time_ms", []).append((processor_end - processor_start) * 1000)
-        shared_metrics["total_processing_time_ms"][:] = shared_metrics["total_processing_time_ms"][-N:]
+        update_metric(shared_metrics, "total_processing_time_ms", (processor_end - processor_start) * 1000)

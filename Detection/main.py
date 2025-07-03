@@ -45,7 +45,7 @@ if __name__ == "__main__":
     shared_metrics["output_panel_time_ms"] = manager.list()
     shared_metrics["output_api_time_ms"] = manager.list()
     shared_metrics["output_draw_time_ms"] = manager.list()
-    shared_metrics["output_panel_enrich_time_ms"] = manager.list()
+    shared_metrics["output_encode_time_ms"] = manager.list()
     shared_metrics["output_total_processing_time_ms"] = manager.list()
     shared_metrics["output_fps"] = manager.list()
 
