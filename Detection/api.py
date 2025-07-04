@@ -8,8 +8,6 @@ from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 from starlette.responses import StreamingResponse, JSONResponse
 
-from Detection.processor.processorSingleImage import SingleImageProcessor
-
 # Allow your frontend origin, or use ["*"] for any (dev only!)
 origins = [
     "*",
@@ -61,7 +59,6 @@ def inject_queues(frame_queue, mjpeg_queue, shared_config, shared_metrics):
     app.state.frame_input_queue = frame_queue
     app.state.mjpeg_frame_queue = mjpeg_queue
     app.state.shared_config = shared_config
-    app.state.single_image_processor = SingleImageProcessor()
     app.state.shared_metrics = shared_metrics
 
 
@@ -95,18 +92,6 @@ async def upload_frame(request: Request):
     except Exception as e:
         return {"status": f"queue error: {e}"}
     return {"status": "frame received"}
-
-
-@app.post("/api/detect_item")
-async def upload_frame(image: UploadFile = File(...)):
-    frame_bytes = await image.read()
-    result = app.state.single_image_processor.process_image(
-        image_input=frame_bytes,
-        include_ocr=True,
-        detection_threshold=0.8,
-        ocr_threshold=0.5
-    )
-    return JSONResponse(content=result)
 
 
 @app.get("/api/regions")

@@ -10,7 +10,9 @@ from fastapi.staticfiles import StaticFiles
 from sqlalchemy import text, func, Integer
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.future import select
+from starlette.responses import JSONResponse
 
+from Detection.processor.processorSingleImage import SingleImageProcessor
 from config.database import get_db, engine
 from models.models import Product, Base
 from models.schemas import ProductOut
@@ -34,6 +36,8 @@ async def lifespan(app: FastAPI):
     # Run at startup
     async with engine.begin() as conn:
         await conn.run_sync(Base.metadata.create_all)
+        app.state.single_image_processor = SingleImageProcessor()
+
     yield
     # Run at shutdown (if needed)
 
@@ -240,6 +244,17 @@ async def fuzzy_product_lookup(
     product["confidence"] = float(product.pop("sim"))
     return product
 
+
+@app.post("/api/detect_item")
+async def upload_frame(image: UploadFile = File(...)):
+    frame_bytes = await image.read()
+    result = app.state.single_image_processor.process_image(
+        image_input=frame_bytes,
+        include_ocr=True,
+        detection_threshold=0.8,
+        ocr_threshold=0.5
+    )
+    return JSONResponse(content=result)
 
 if __name__ == "__main__":
     uvicorn.run("main:app", host="0.0.0.0", port=8001, reload=False)
