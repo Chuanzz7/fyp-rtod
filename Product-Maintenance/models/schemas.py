@@ -39,8 +39,7 @@ class ProductLookupItem(BaseModel):
 
 
 class BatchProductLookupRequest(BaseModel):
-    items: List[ProductLookupItem]
-
+    items: Optional[List[ProductLookupItem]] = []
 
 class ProductLookupResponse(BaseModel):
     track_id: int

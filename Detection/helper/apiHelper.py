@@ -5,6 +5,8 @@ from typing import Dict, Any, List
 
 import httpx
 
+PRODUCT_ENDPOINT = "http://localhost:8001"
+PI_URL = "http://192.168.0.93:9000"
 
 class APIManager:
     """
@@ -12,7 +14,7 @@ class APIManager:
     blocking the main processing loop. It is thread-safe.
     """
 
-    def __init__(self, api_id_max_age: int = 100, base_url: str = "http://localhost:8001", timeout: float = 1.0):
+    def __init__(self, api_id_max_age: int = 100, base_url: str = PRODUCT_ENDPOINT, timeout: float = 1.0):
         """
         Initializes the APIManager.
 
@@ -26,7 +28,6 @@ class APIManager:
         # Thread-safe state, protected by the lock
         self._lock = threading.Lock()
         self.api_results: Dict[int, Dict[str, Any]] = {}
-        self.api_called_ids: set[int] = set()
         self.api_id_last_seen: Dict[int, int] = {}
 
         # Setup for the background asyncio thread
@@ -65,8 +66,6 @@ class APIManager:
         with self._lock:
             for row in panel_rows:
                 track_id = row["object_id"]
-                if track_id in self.api_called_ids:
-                    continue
 
                 ocr_results = row.get("ocr_results", [])
                 ocr_text = " ".join([r.get("text", "") for r in ocr_results]).strip()
@@ -78,7 +77,6 @@ class APIManager:
                         "category": class_name,
                         "ocr": ocr_text
                     })
-                    self.api_called_ids.add(track_id)
 
             # Update last seen timestamp for all currently visible tracks
             for track_id in current_frame_track_ids:
@@ -90,11 +88,10 @@ class APIManager:
                 if frame_count - last_seen > self.api_id_max_age
             ]
             for tid in to_remove:
-                self.api_called_ids.discard(tid)
+                # self.api_called_ids.discard(tid)
                 self.api_id_last_seen.pop(tid, None)
                 self.api_results.pop(tid, None)
 
-        if batch_data:
             self._loop.call_soon_threadsafe(
                 lambda: asyncio.create_task(self._fetch_product_ids_batch_async(batch_data)))
 
@@ -102,7 +99,7 @@ class APIManager:
         """The actual async function that performs the batch API call."""
         try:
             # Send all items in a single API call
-            resp = await self._client.post("/api/product_lookup_batch", json={"items": batch_data})
+            resp = await self._client.post("/api/product_lookup_batch_monitor", json={"items": batch_data})
 
             if resp.status_code == 200:
                 data = resp.json()

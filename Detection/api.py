@@ -3,10 +3,12 @@ import time
 from typing import List, Optional
 
 import requests
-from fastapi import FastAPI, Request, UploadFile, File
+from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
-from starlette.responses import StreamingResponse, JSONResponse
+from starlette.responses import StreamingResponse
+
+from Detection.helper.apiHelper import PI_URL, PRODUCT_ENDPOINT
 
 # Allow your frontend origin, or use ["*"] for any (dev only!)
 origins = [
@@ -24,7 +26,6 @@ app.add_middleware(
     allow_methods=["*"],  # allow all HTTP methods
     allow_headers=["*"],  # allow all headers
 )
-PI_URL = "http://192.168.0.93:9000"
 
 
 # Pydantic models for bounding box API
@@ -200,8 +201,16 @@ def start():
     try:
         resp = requests.post(f"{PI_URL}/start_stream", timeout=2)
         print("Pi response:", resp.text)
+
     except Exception as e:
         print("Failed to contact Pi:", e)
+
+    try:
+        resp = requests.post(f"{PRODUCT_ENDPOINT}/api/start_monitor", timeout=2)
+        print("Product response:", resp.text)
+
+    except Exception as e:
+        print("Failed to contact Product:", e)
 
 
 @app.post("/stop")
@@ -213,6 +222,13 @@ def start():
         print("Pi response:", resp.text)
     except Exception as e:
         print("Failed to contact Pi:", e)
+
+    try:
+        resp = requests.post(f"{PRODUCT_ENDPOINT}/api/stop_monitor", timeout=2)
+        print("Product response:", resp.text)
+
+    except Exception as e:
+        print("Failed to contact Product:", e)
 
 
 @app.get("/api/metrics")
