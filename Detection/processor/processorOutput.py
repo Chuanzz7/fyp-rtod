@@ -99,15 +99,11 @@ def process_output_main(input_queue: Queue, mjpeg_frame_queue: Queue, shared_con
 
 
 def enrich_rows_with_api_results(panel_rows: List[Dict], api_results: Dict) -> List[Dict]:
-    """Pure function to add API results to panel data structures for display."""
-    enriched_rows = []
     for row in panel_rows:
-        track_id = row["object_id"]
-        enriched_row = row.copy()
+        track_id = int(row["object_id"])
         if track_id in api_results:
-            enriched_row["api_result"] = api_results[track_id]
-        enriched_rows.append(enriched_row)
-    return enriched_rows
+            row["api_result"] = api_results[track_id]
+    return panel_rows
 
 
 def check_wrong_placement(panel_rows, assigned_regions, iou_threshold=0.1):

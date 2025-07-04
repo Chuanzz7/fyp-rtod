@@ -23,3 +23,4 @@ class Product(Base):
     ocr: Mapped[str] = mapped_column(String(256), default="")
     ocr_normalized: Mapped[str] = mapped_column(String(1000), default="")
     inventoryStatus: Mapped[str] = mapped_column(String(256), default="INSTOCK")
+

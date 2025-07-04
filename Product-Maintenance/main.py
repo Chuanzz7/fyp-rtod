@@ -15,7 +15,7 @@ from starlette.responses import JSONResponse
 from Detection.processor.processorSingleImage import SingleImageProcessor
 from config.database import get_db, engine
 from models.models import Product, Base
-from models.schemas import ProductOut
+from models.schemas import ProductOut, BatchProductLookupResponse, BatchProductLookupRequest, ProductLookupResponse
 
 # Allow your frontend origin, or use ["*"] for any (dev only!)
 origins = [
@@ -108,7 +108,6 @@ async def create_product(
         price: float = Form(0.0),
         quantity: int = Form(0),
         ocr: str = Form(""),
-        inventoryStatus: str = Form("INSTOCK"),
         image: UploadFile = File(None),
         db: AsyncSession = Depends(get_db)
 ):
@@ -122,6 +121,14 @@ async def create_product(
 
     ocr_normalized = re.sub(r'\s+', '', ocr).lower()
 
+    # Determine inventory status at backend
+    if quantity > 10:
+        inventory_status = "in_stock"
+    elif 1 <= quantity <= 10:
+        inventory_status = "low_stock"
+    else:
+        inventory_status = "out_of_stock"
+
     # Create product data
     product_data = {
         "code": product_code,
@@ -133,7 +140,7 @@ async def create_product(
         "image": image_filename,
         "ocr": ocr,
         "ocr_normalized": ocr_normalized,
-        "inventoryStatus": inventoryStatus
+        "inventoryStatus": inventory_status
     }
 
     db_product = Product(**product_data)
@@ -152,7 +159,6 @@ async def update_product(
         price: float = Form(None),
         quantity: int = Form(None),
         ocr: str = Form(None),
-        inventoryStatus: str = Form(None),
         image: UploadFile = File(None),
         db: AsyncSession = Depends(get_db)
 ):
@@ -173,11 +179,16 @@ async def update_product(
         update_data["price"] = price
     if quantity is not None:
         update_data["quantity"] = quantity
+        # --- Backend logic for inventory status ---
+        if quantity > 10:
+            update_data["inventoryStatus"] = "in_stock"
+        elif 1 <= quantity <= 10:
+            update_data["inventoryStatus"] = "low_stock"
+        else:
+            update_data["inventoryStatus"] = "out_of_stock"
     if ocr is not None:
         update_data["ocr"] = ocr
         update_data["ocr_normalized"] = re.sub(r'\s+', '', ocr).lower()
-    if inventoryStatus is not None:
-        update_data["inventoryStatus"] = inventoryStatus
 
     # Handle image upload
     if image:
@@ -245,6 +256,58 @@ async def fuzzy_product_lookup(
     return product
 
 
+@app.post("/api/product_lookup_batch", response_model=BatchProductLookupResponse)
+async def batch_fuzzy_product_lookup(
+        request: BatchProductLookupRequest,
+        db: AsyncSession = Depends(get_db)
+):
+    results = []
+
+    # Process each item in the batch
+    for item in request.items:
+        try:
+            clean_ocr = re.sub(r'\s+', '', item.ocr).lower()
+
+            # Same query as the original endpoint
+            query = text("""
+                         SELECT *, similarity(ocr_normalized, :clean_ocr) AS sim
+                         FROM products
+                         WHERE ocr_normalized % :clean_ocr
+                           AND category = :category
+                         ORDER BY sim DESC
+                             LIMIT 1
+                         """)
+            result = await db.execute(query, {"clean_ocr": clean_ocr, "category": item.category})
+            row = result.first()
+
+            if row:
+                product = dict(row._mapping)
+                confidence = float(product.pop("sim"))
+
+                # Create response with track_id mapping
+                response_item = ProductLookupResponse(
+                    track_id=item.track_id,
+                    code=product.get("code"),
+                    confidence=confidence,
+                    category=product.get("category")
+                    # Add other fields as needed: name=product.get("name"), etc.
+                )
+                results.append(response_item)
+
+        except Exception as e:
+            # Handle individual item errors without failing the entire batch
+            print(f"Error processing item {item.track_id}: {e}")
+            response_item = ProductLookupResponse(
+                track_id=item.track_id,
+                code=None,
+                confidence=0.0,
+                category=item.category
+            )
+            results.append(response_item)
+
+    return BatchProductLookupResponse(results=results)
+
+
 @app.post("/api/detect_item")
 async def upload_frame(image: UploadFile = File(...)):
     frame_bytes = await image.read()
@@ -255,6 +318,7 @@ async def upload_frame(image: UploadFile = File(...)):
         ocr_threshold=0.5
     )
     return JSONResponse(content=result)
+
 
 if __name__ == "__main__":
     uvicorn.run("main:app", host="0.0.0.0", port=8001, reload=False)

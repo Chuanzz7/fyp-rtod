@@ -1,5 +1,5 @@
 # schemas.py
-from typing import Optional
+from typing import Optional, List
 
 from pydantic import BaseModel
 
@@ -30,3 +30,25 @@ class ProductOut(ProductBase):
 
     class Config:
         from_attributes = True  # <--- NEW (Pydantic v2+)
+
+
+class ProductLookupItem(BaseModel):
+    track_id: int
+    category: str
+    ocr: str
+
+
+class BatchProductLookupRequest(BaseModel):
+    items: List[ProductLookupItem]
+
+
+class ProductLookupResponse(BaseModel):
+    track_id: int
+    code: Optional[str] = None
+    confidence: float = 0.0
+    category: Optional[str] = None
+    # Add other product fields as needed
+
+
+class BatchProductLookupResponse(BaseModel):
+    results: List[ProductLookupResponse]

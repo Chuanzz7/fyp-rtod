@@ -1,7 +1,6 @@
 import asyncio
 import threading
 import time
-from queue import SimpleQueue
 from typing import Dict, Any, List
 
 import httpx
@@ -57,10 +56,10 @@ class APIManager:
 
     def process_and_call_api(self, panel_rows: List[Dict[str, Any]], frame_count: int):
         """
-        Identifies new objects that need an API call and submits them to the
-        background queue without blocking. Also cleans up old track IDs.
+        Identifies new objects that need an API call and submits them as a batch
+        to the background queue without blocking. Also cleans up old track IDs.
         """
-        tasks_to_submit = []
+        batch_data = []
         current_frame_track_ids = {row["object_id"] for row in panel_rows}
 
         with self._lock:
@@ -74,7 +73,11 @@ class APIManager:
 
                 if ocr_text:
                     class_name = row["class_name"]
-                    tasks_to_submit.append(self._fetch_product_id_async(class_name, ocr_text, track_id))
+                    batch_data.append({
+                        "track_id": track_id,
+                        "category": class_name,
+                        "ocr": ocr_text
+                    })
                     self.api_called_ids.add(track_id)
 
             # Update last seen timestamp for all currently visible tracks
@@ -91,29 +94,39 @@ class APIManager:
                 self.api_id_last_seen.pop(tid, None)
                 self.api_results.pop(tid, None)
 
-        # Submit tasks to the running event loop *outside* the lock
-        for task in tasks_to_submit:
-            self._loop.call_soon_threadsafe(self._task_queue.put_nowait, task)
+        if batch_data:
+            self._loop.call_soon_threadsafe(
+                lambda: asyncio.create_task(self._fetch_product_ids_batch_async(batch_data)))
 
-    async def _fetch_product_id_async(self, class_name: str, ocr_text: str, track_id: int):
-        """The actual async function that performs the API call."""
+    async def _fetch_product_ids_batch_async(self, batch_data: List[Dict[str, Any]]):
+        """The actual async function that performs the batch API call."""
         try:
-            resp = await self._client.post("/api/product_lookup", json={"category": class_name, "ocr": ocr_text})
+            # Send all items in a single API call
+            resp = await self._client.post("/api/product_lookup_batch", json={"items": batch_data})
+
             if resp.status_code == 200:
                 data = resp.json()
-                result = {
-                    "code": data.get('code', 'N/A'),
-                    "confidence": data.get('confidence', 0.0),
-                    "timestamp": time.perf_counter()
-                }
+                results = data.get('results', [])
+
+                # Process each result and store by track_id
                 with self._lock:
-                    self.api_results[track_id] = result
+                    for item_result in results:
+                        track_id = item_result.get('track_id')
+                        if track_id is not None and item_result.get('code') is not None:
+                            result = {
+                                "code": item_result.get('code', 'N/A'),
+                                "confidence": item_result.get('confidence', 0.0),
+                                "timestamp": time.perf_counter()
+                            }
+                            self.api_results[track_id] = result
             else:
-                print(f"[API] Error {resp.status_code} for track_id {track_id}: {resp.text}")
-        except httpx.RequestError as e:
-            print(f"[API] Request exception for track_id {track_id}: {e}")
+                print(f"[API] Batch error {resp.status_code}: {resp.text}")
+                track_ids = [item['track_id'] for item in batch_data]
+                print(f"[API] Failed batch contained track_ids: {track_ids}")
+
         except Exception as e:
-            print(f"[API] Generic exception for track_id {track_id}: {e}")
+            track_ids = [item['track_id'] for item in batch_data]
+            print(f"[API] Batch processing exception for track_ids {track_ids}: {e}")
 
     def get_api_results(self) -> Dict[int, Dict[str, Any]]:
         """Thread-safely returns a copy of the current API results."""
