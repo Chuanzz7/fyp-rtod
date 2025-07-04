@@ -1,5 +1,4 @@
 import queue
-import queue
 import time
 from multiprocessing import Queue
 
@@ -16,7 +15,7 @@ def processor_tensor_main(frame_input_queue: Queue, output_queue: Queue, shared_
     inference_engine = InferenceEngine()
     tracking_manager = TrackingManager()
     ocr_processor = OCRProcessor(warmup=True)
-    object_cache = ObjectCache()
+    object_cache = ObjectCache(ocr_interval_frames=30)
     N = 120  # or any number of frames you want to keep
 
     print("All components initialized, waiting for frames...")
@@ -31,63 +30,46 @@ def processor_tensor_main(frame_input_queue: Queue, output_queue: Queue, shared_
 
         processor_start = time.perf_counter()
 
-        # Decode frame
         decode_start = time.perf_counter()
         img = decode_frame(frame_bytes)
         decode_end = time.perf_counter()
-
-        # Run inference
         output, inference_time = inference_engine.run_inference(img)
-
-        # Process detections
         detections = DetectionProcessor.process_detections(output)
-
-        # Update tracking
         tracks = tracking_manager.update_tracks(detections, img)
         track_info = TrackingManager.extract_track_info(tracks)
 
-        # Extract crops only for objects needing OCR
-        sort_start = time.perf_counter()
-        crops, crop_metadata, track_ids_needing_ocr = CropExtractor.extract_crops(
-            img, track_info, object_cache
-        )
+        # --- UPDATE: Update cache for all currently tracked objects FIRST ---
+        # This ensures 'frames_tracked' is up-to-date before checking 'needs_ocr'
+        for x1, y1, x2, y2, track_id, class_name, score in track_info:
+            object_cache.update_object(track_id, (x1, y1, x2, y2), frame_id, class_name,
+                                       [])  # Pass empty OCR results for now
 
-        track_info_map = {ti[4]: ti for ti in track_info}  # ti[4] is the track_id
-
+        # --- UPDATE: Pass current_frame_id to the crop extractor ---
         crops_to_process = CropExtractor.extract_crops_as_dict(
-            img, track_info, object_cache
+            img, track_info, object_cache, current_frame_id=frame_id, min_frames=15
         )
 
-        # 2. Process OCR only if there are crops
+        # Process OCR only if there are crops that meet the new criteria
         if crops_to_process:
             ocr_start = time.perf_counter()
-            # The result is a dictionary {track_id: ocr_result}
             ocr_results_dict = ocr_processor.process_crops_dict(crops_to_process)
             ocr_end = time.perf_counter()
+            update_metric(shared_metrics, "ocr_time_ms", (ocr_end - ocr_start) * 1000)
 
-            shared_metrics.setdefault("ocr_time_ms", []).append((ocr_end - ocr_start) * 1000)
-            shared_metrics["ocr_time_ms"][:] = shared_metrics["ocr_time_ms"][-N:]
-
-            # 3. Update cache using the correctly-keyed OCR results
+            # --- UPDATE: Update cache AGAIN, this time with the new OCR results ---
             for track_id, ocr_lines in ocr_results_dict.items():
-                # Check if the track still exists in the current frame
-                if track_id in track_info_map:
-                    # Get the most recent bounding box for this track_id
-                    x1, y1, x2, y2, _, class_name, _ = track_info_map[track_id]
-                    filtered_ocr = OCRProcessor.filter_ocr_results(ocr_lines)
-                    # Update cache with OCR. The box update is for the current frame.
-                    object_cache.update_object(track_id, (x1, y1, x2, y2), frame_id, class_name, filtered_ocr)
+                # We don't need to check if the track exists, because it must exist to have been selected for OCR
+                current_box = object_cache.cache[track_id]["history"][-1][:4]  # Get the most recent box
+                current_class_name = object_cache.cache[track_id]["class_name"]
+                filtered_ocr = OCRProcessor.filter_ocr_results(ocr_lines)
 
-        # Update cache for all tracked objects (even those without new OCR)
-        for x1, y1, x2, y2, track_id, class_name, score in track_info:
-            if track_id not in track_ids_needing_ocr:
-                object_cache.update_object(track_id, (x1, y1, x2, y2), frame_id, class_name, [])
+                # This call will now APPEND the new OCR results and update the last_ocr_frame
+                object_cache.update_object(track_id, current_box, frame_id, current_class_name, filtered_ocr)
 
         # Cleanup old tracks
         object_cache.cleanup_old_tracks(frame_id)
-        sort_end = time.perf_counter()
 
-        # Create panel rows
+        # Create panel rows with aggregated results
         panel_rows = ResultAssembler.create_panel_rows(track_info, object_cache)
 
         # Draw results
@@ -115,7 +97,7 @@ def processor_tensor_main(frame_input_queue: Queue, output_queue: Queue, shared_
         update_metric(shared_metrics, "dfine_inference_time_ms", inference_time)
 
         # SORT & Cache
-        update_metric(shared_metrics, "sort_and_cache_time_ms", (sort_end - sort_start) * 1000)
+        # update_metric(shared_metrics, "sort_and_cache_time_ms", (sort_end - sort_start) * 1000)
 
         # Draw time
         update_metric(shared_metrics, "draw_time_ms", (draw_end - draw_start) * 1000)

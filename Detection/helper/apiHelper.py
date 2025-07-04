@@ -8,6 +8,7 @@ import httpx
 PRODUCT_ENDPOINT = "http://localhost:8001"
 PI_URL = "http://192.168.0.93:9000"
 
+
 class APIManager:
     """
     Manages asynchronous API calls in a dedicated background thread to avoid
@@ -67,8 +68,8 @@ class APIManager:
             for row in panel_rows:
                 track_id = row["object_id"]
 
-                ocr_results = row.get("ocr_results", [])
-                ocr_text = " ".join([r.get("text", "") for r in ocr_results]).strip()
+                ocr_results = row.get("best_ocr_texts", [])
+                ocr_text = " ".join(ocr_results)
 
                 if ocr_text:
                     class_name = row["class_name"]

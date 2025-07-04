@@ -25,6 +25,13 @@ MAX_TRACK_DISAPPEAR_FRAMES = 50
 _input_tensor = None
 _orig_size = None
 
+# In your constants section or at the start of processor_tensor_main
+VIDEO_FPS = 30  # Assumed FPS of your input video stream
+OCR_INTERVAL_SECONDS = 1.0
+OCR_INTERVAL_FRAMES = int(VIDEO_FPS * OCR_INTERVAL_SECONDS)
+MIN_FRAMES_FOR_OCR = 15  # The number of frames an object must be stable before we start OCR
+MAX_OCR_HISTORY_PER_OBJECT = 20
+
 
 class GPUBufferManager:
     """Manages GPU memory buffers for inference"""
@@ -409,82 +416,149 @@ class OCRProcessor:
 
 
 class ObjectCache:
-    """Manages object tracking cache and OCR results"""
+    """
+    Manages object tracking cache and intelligently aggregates OCR results over time.
+    """
 
-    def __init__(self):
+    def __init__(self, ocr_interval_frames: int = 30):
         self.cache: Dict[int, Dict[str, Any]] = {}
+        self.ocr_interval_frames = ocr_interval_frames
+        print(f"✅ ObjectCache initialized. OCR will be triggered for stable tracks every {ocr_interval_frames} frames.")
 
     def update_object(self, track_id: int, box: Tuple[int, int, int, int],
-                      frame_id: int, class_name: str, ocr_results: List[Dict]) -> None:
-        """Update object in cache"""
+                      frame_id: int, class_name: str, new_ocr_results: List[Dict]) -> None:
+        """Update object in cache with new tracking and OCR data, with history limits."""
         x1, y1, x2, y2 = box
 
         if track_id not in self.cache:
             self.cache[track_id] = {
                 "history": [],
                 "first_seen": frame_id,
-                "frames_tracked": 1,
-                "ocr_results": [],
+                "frames_tracked": 0,
+                "ocr_readings_history": [],
+                "last_ocr_frame": -1,
                 "last_seen": frame_id,
                 "class_name": class_name,
-                "ocr_processed": False,  # Flag to track if OCR has been done
-                "api_called": False,
             }
-        else:
-            # Increment frames_tracked if seen in consecutive frames
-            self.cache[track_id]["frames_tracked"] += 1
 
-        # Update tracking info
+        # Update tracking info (you could also limit this history if needed, using the same technique)
         self.cache[track_id]["history"].append((x1, y1, x2, y2, frame_id))
         self.cache[track_id]["last_seen"] = frame_id
         self.cache[track_id]["class_name"] = class_name
+        self.cache[track_id]["frames_tracked"] += 1
 
-        # Only update OCR if we haven't processed it yet and we have new results
-        if not self.cache[track_id]["ocr_processed"] and ocr_results:
-            self.cache[track_id]["ocr_results"] = ocr_results
-            self.cache[track_id]["ocr_processed"] = True
-            print(f"  ▸ OCR saved for track {track_id}: {len(ocr_results)} results")
+        # If new OCR results were provided, add them and update the last OCR frame
+        if new_ocr_results:
+            self.cache[track_id]["ocr_readings_history"].extend(new_ocr_results)
+            self.cache[track_id]["last_ocr_frame"] = frame_id
 
-    def needs_ocr(self, track_id: int, min_frames: int = 5) -> bool:
-        """Check if OCR processing is needed for this track, and has survived min_frames"""
+            # --- THE NEW CODE TO LIMIT HISTORY SIZE ---
+            # Keep only the last N items in the history list.
+            # Python's slice assignment is very efficient for this.
+            ocr_history = self.cache[track_id]["ocr_readings_history"]
+            if len(ocr_history) > MAX_OCR_HISTORY_PER_OBJECT:
+                self.cache[track_id]["ocr_readings_history"] = ocr_history[-MAX_OCR_HISTORY_PER_OBJECT:]
+            # --- END OF NEW CODE ---
+
+    def needs_ocr(self, track_id: int, current_frame_id: int, min_frames: int) -> bool:
+        """
+        Check if OCR processing is needed for this track.
+        - The object must be tracked for a minimum number of frames.
+        - Enough time (frames) must have passed since the last OCR.
+        """
         if track_id not in self.cache:
-            return False  # Don't OCR unknown tracks!
-        tracked = self.cache[track_id]
-        return (
-                not tracked["ocr_processed"]
-                and tracked["frames_tracked"] >= min_frames
-        )
+            return False  # Should not happen if called on a tracked object
 
-    def get_ocr_results(self, track_id: int) -> List[Dict]:
-        """Get cached OCR results for a track"""
-        if track_id in self.cache:
-            return self.cache[track_id]["ocr_results"]
-        return []
+        tracked_obj = self.cache[track_id]
+
+        is_stable = tracked_obj["frames_tracked"] >= min_frames
+        is_time_for_next_ocr = (current_frame_id - tracked_obj["last_ocr_frame"]) >= self.ocr_interval_frames
+
+        return is_stable and is_time_for_next_ocr
+
+    def get_aggregated_ocr_results(self, track_id: int) -> List[Dict]:
+        """
+        Get aggregated and ranked OCR results for a track.
+        This function counts occurrences of each text and returns the most common ones first.
+        """
+        if track_id not in self.cache or not self.cache[track_id]["ocr_readings_history"]:
+            return []
+
+        text_aggregator: Dict[str, Dict[str, Any]] = {}
+        for reading in self.cache[track_id]["ocr_readings_history"]:
+            text = reading["text"]
+            confidence = reading["confidence"]
+            if text not in text_aggregator:
+                text_aggregator[text] = {"count": 0, "confidence_sum": 0.0}
+            text_aggregator[text]["count"] += 1
+            text_aggregator[text]["confidence_sum"] += confidence
+
+        # Create a list of results with aggregated data
+        aggregated_list = []
+        for text, data in text_aggregator.items():
+            aggregated_list.append({
+                "text": text,
+                "count": data["count"],
+                "avg_confidence": round(data["confidence_sum"] / data["count"], 3)
+            })
+
+        # Sort the list by count (most frequent first), then by confidence
+        return sorted(aggregated_list, key=lambda x: (x["count"], x["avg_confidence"]), reverse=True)
+
+    def get_best_ocr_texts(self, track_id: int, min_count: int = 2, min_confidence: float = 0.65) -> List[str]:
+        """
+        Filters the aggregated results to return a clean list of the most reliable text strings.
+        This is the perfect input for fuzzy searching.
+
+        Args:
+            track_id: The ID of the object to get texts for.
+            min_count: The minimum number of times a text must be seen to be included.
+            min_confidence: The minimum average confidence score for a text to be included.
+
+        Returns:
+            A list of high-quality OCR text strings.
+        """
+        aggregated_results = self.get_aggregated_ocr_results(track_id)
+        if not aggregated_results:
+            return []
+
+        best_texts = []
+        for result in aggregated_results:
+            # Apply filters to select only the most reliable text
+            if result['count'] >= min_count and result['avg_confidence'] >= min_confidence:
+                best_texts.append(result['text'])
+
+        # As a final refinement, you could also just return the top N results
+        # For example, to return only the top 3 most frequent & confident texts:
+        # return [result['text'] for result in aggregated_results[:3]]
+
+        return best_texts
 
     def cleanup_old_tracks(self, current_frame: int,
                            max_disappear: int = MAX_TRACK_DISAPPEAR_FRAMES) -> None:
-        """Remove old tracks from cache"""
+        """Remove old tracks from cache."""
         remove_ids = [
             oid for oid, data in self.cache.items()
             if current_frame - data["last_seen"] > max_disappear
         ]
-
         for oid in remove_ids:
+            # print(f"  ▸ Removing expired track {oid} from cache.")
             del self.cache[oid]
-            # print(f"  ▸ Removed old track {oid} from cache")
 
 
 class CropExtractor:
     """Extracts image crops from tracked objects"""
 
     @staticmethod
-    def extract_crops(img: np.ndarray, track_info: List[Tuple], object_cache: ObjectCache, min_frames: int = 15):
+    def extract_crops(img: np.ndarray, track_info: List[Tuple], object_cache: ObjectCache,
+                      current_frame_id: int, min_frames: int = 15):  # Add current_frame_id
         crops = []
         crop_metadata = []
         track_ids_needing_ocr = []
 
         for x1, y1, x2, y2, track_id, class_name, score in track_info:
-            if object_cache.needs_ocr(track_id, min_frames=min_frames):
+            # Pass current_frame_id to the updated needs_ocr method
+            if object_cache.needs_ocr(track_id, current_frame_id, min_frames=min_frames):
                 crop = img[y1:y2, x1:x2]
                 if crop.size == 0:
                     continue
@@ -496,18 +570,19 @@ class CropExtractor:
 
     @staticmethod
     def extract_crops_as_dict(img: np.ndarray, track_info: List[Tuple], object_cache: ObjectCache,
-                              min_frames: int = 15) -> Dict[int, np.ndarray]:
+                              current_frame_id: int, min_frames: int = 15) -> Dict[
+        int, np.ndarray]:  # Add current_frame_id
         """
         Extracts crops for objects needing OCR and returns them in a dictionary
-        keyed by their track_id. This prevents state mismatch errors.
+        keyed by their track_id.
         """
         crops_to_process = {}
         for x1, y1, x2, y2, track_id, class_name, score in track_info:
-            if object_cache.needs_ocr(track_id, min_frames=min_frames):
+            # Pass current_frame_id to the updated needs_ocr method
+            if object_cache.needs_ocr(track_id, current_frame_id, min_frames=min_frames):
                 crop = img[y1:y2, x1:x2]
                 if crop.size == 0:
                     continue
-                # Directly associate the crop with its track_id
                 crops_to_process[track_id] = crop
         return crops_to_process
 
@@ -517,16 +592,24 @@ class ResultAssembler:
 
     @staticmethod
     def create_panel_rows(track_info: List[Tuple], object_cache: ObjectCache) -> List[Dict]:
-        """Create panel rows with all tracking and OCR information"""
+        """Create panel rows with all tracking and aggregated OCR information"""
         panel_rows = []
 
         for x1, y1, x2, y2, track_id, class_name, score in track_info:
+            # Get the full aggregated data for detailed analysis (optional)
+            aggregated_results = object_cache.get_aggregated_ocr_results(track_id)
+
+            # Get the clean, filtered list of strings for fuzzysearch
+            best_texts_for_search = object_cache.get_best_ocr_texts(track_id)
+
             row = {
                 "object_id": track_id,
                 "class_name": class_name,
                 "confidence": round(float(score or 1.0), 3),
                 "box": [x1, y1, x2, y2],
-                "ocr_results": object_cache.get_ocr_results(track_id)
+                # Use the new aggregation method
+                "ocr_results": aggregated_results,  # The full data
+                "best_ocr_texts": best_texts_for_search  # The clean list for fuzzysearch
             }
             panel_rows.append(row)
 

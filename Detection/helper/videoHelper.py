@@ -72,13 +72,22 @@ def build_detection_panel(enriched_rows: List[Dict[str, Any]], height: int) -> n
             draw_line(api_label, current_y, font_sec, scale_sec, thick_sec, API_COLOR)
 
         # Lines 4+: OCR Results (if present)
-        if ocr_results := row.get("ocr_results"):
-            for ocr in ocr_results:
-                ocr_text = ocr.get('text', '')[:28]
+        if ocr_results := row.get("best_ocr_texts"):
+            for ocr_text in ocr_results:
                 if not ocr_text: continue
+                ocr_text_to_draw = ocr_text[:28]
                 current_y += 18
                 if current_y > panel_bottom_margin: break
-                draw_line(f"  -> {ocr_text}", current_y, font_sec, scale_sec, thick_sec, OCR_COLOR, indent=12)
+                # Draw the text string directly
+                draw_line(f"  -> {ocr_text_to_draw}", current_y, font_sec, scale_sec, thick_sec, OCR_COLOR, indent=12)
+
+        # if ocr_results := row.get("ocr_results"):
+        #     for ocr in ocr_results:
+        #         ocr_text = ocr.get('text', '')[:28]
+        #         if not ocr_text: continue
+        #         current_y += 18
+        #         if current_y > panel_bottom_margin: break
+        #         draw_line(f"  -> {ocr_text}", current_y, font_sec, scale_sec, thick_sec, OCR_COLOR, indent=12)
 
         y = current_y + DETECTION_GAP
 
