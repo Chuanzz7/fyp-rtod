@@ -9,14 +9,12 @@ from Detection.helper.metricHelper import update_metric
 
 
 def processor_tensor_main(frame_input_queue: Queue, output_queue: Queue, shared_metrics):
-    """Main processing function with refactored components - ORIGINAL QUEUE-BASED PIPELINE"""
     # Initialize components
     GPUBufferManager.initialize_buffers()
     inference_engine = InferenceEngine()
     tracking_manager = TrackingManager()
     ocr_processor = OCRProcessor(warmup=True)
     object_cache = ObjectCache(ocr_interval_frames=30)
-    N = 120  # or any number of frames you want to keep
 
     print("All components initialized, waiting for frames...")
 
@@ -46,7 +44,7 @@ def processor_tensor_main(frame_input_queue: Queue, output_queue: Queue, shared_
 
         # --- UPDATE: Pass current_frame_id to the crop extractor ---
         crops_to_process = CropExtractor.extract_crops_as_dict(
-            img, track_info, object_cache, current_frame_id=frame_id, min_frames=15
+            img, track_info, object_cache, current_frame_id=frame_id, min_frames=5
         )
 
         # Process OCR only if there are crops that meet the new criteria

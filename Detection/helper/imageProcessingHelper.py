@@ -1,5 +1,6 @@
 import base64
 import time
+from collections import deque
 from pathlib import Path
 from typing import List, Tuple, Dict, Any, Optional, Union
 
@@ -20,18 +21,17 @@ DEVICE = "cuda:0"
 OCR_CONFIDENCE_THRESHOLD = 0.5
 DETECTION_CONFIDENCE_THRESHOLD = 0.8
 MAX_TRACK_DISAPPEAR_FRAMES = 50
-CROP_SCALE_FACTOR = 0.85
 
 # Global buffers
 _input_tensor = None
 _orig_size = None
 
 # In your constants section or at the start of processor_tensor_main
-VIDEO_FPS = 15  # Assumed FPS of your input video stream
+VIDEO_FPS = 20  # Assumed FPS of your input video stream
 OCR_INTERVAL_SECONDS = 2.0
 OCR_INTERVAL_FRAMES = int(VIDEO_FPS * OCR_INTERVAL_SECONDS)
 MIN_FRAMES_FOR_OCR = 5  # The number of frames an object must be stable before we start OCR
-MAX_OCR_HISTORY_PER_OBJECT = 10
+MAX_OCR_HISTORY_PER_OBJECT = 20
 
 
 class GPUBufferManager:
@@ -306,47 +306,29 @@ class OCRProcessor:
             print("⚠️  Model not warmed up, warming up now...")
             self.warmup()
 
-    def process_crops(self, crops: List[np.ndarray]) -> List:
-        """Process multiple image crops with OCR - optimized for products"""
-        if not crops:
-            return []
-
-        # Ensure model is warmed up
-        self.ensure_warmed_up()
-
-        # Process with optimized parameters for product text
-        results = []
-        for i, crop in enumerate(crops):
-            # print(f"  ▸ Processing crop {i + 1}/{len(crops)}")
-            # Preprocess crop for better OCR
-            processed_crop = self._preprocess_crop(crop)
-            result = self.ocr.ocr(
-                processed_crop,
-                det=True,
-                cls=True,
-                # Additional parameters for better product text detection
-            )
-            results.append(result)
-
-        return results
 
     def _preprocess_crop(self, crop: np.ndarray) -> np.ndarray:
-        """Preprocess image crop for better OCR on products"""
-        # Validate input
-        if crop.size == 0:
-            raise ValueError("Empty crop provided")
+        """
+        Preprocesses a crop for better OCR performance by automatically handling
+        both light-on-dark and dark-on-light text.
+        """
+        if crop is None or crop.size == 0:
+            return None
 
-        # Convert to grayscale if needed
+        # 1. Convert to grayscale
         if len(crop.shape) == 3:
             gray = cv2.cvtColor(crop, cv2.COLOR_BGR2GRAY)
         else:
             gray = crop.copy()
 
-        # Enhance contrast for faint text
+        mean_intensity = np.mean(gray)
+
+        if mean_intensity < 127:
+            gray = cv2.bitwise_not(gray)
+
         clahe = cv2.createCLAHE(clipLimit=2.0, tileGridSize=(8, 8))
         enhanced = clahe.apply(gray)
 
-        # Convert back to BGR for PaddleOCR
         return cv2.cvtColor(enhanced, cv2.COLOR_GRAY2BGR)
 
     def process_single_crop(self, crop: np.ndarray) -> List[Dict]:
@@ -408,9 +390,9 @@ class OCRProcessor:
         # otherwise iterate. Iteration is safer and shown here.
         results_dict = {}
         for track_id, crop in crops_dict.items():
-            processed_crop = self._preprocess_crop(crop)
+            # processed_crop = self._preprocess_crop(crop)
             # The result from ocr() is a list of lines for this single crop
-            ocr_lines = self.ocr.ocr(processed_crop, det=True, cls=True)
+            ocr_lines = self.ocr.ocr(crop, det=True, cls=True)
             results_dict[track_id] = ocr_lines
 
         return results_dict
@@ -421,7 +403,7 @@ class ObjectCache:
     Manages object tracking cache and intelligently aggregates OCR results over time.
     """
 
-    def __init__(self, ocr_interval_frames: int = 30):
+    def __init__(self, ocr_interval_frames: int = OCR_INTERVAL_FRAMES):
         self.cache: Dict[int, Dict[str, Any]] = {}
         self.ocr_interval_frames = ocr_interval_frames
         print(f"✅ ObjectCache initialized. OCR will be triggered for stable tracks every {ocr_interval_frames} frames.")
@@ -433,10 +415,10 @@ class ObjectCache:
 
         if track_id not in self.cache:
             self.cache[track_id] = {
-                "history": [],
+                "history": deque(maxlen=MAX_OCR_HISTORY_PER_OBJECT),
                 "first_seen": frame_id,
                 "frames_tracked": 0,
-                "ocr_readings_history": [],
+                "ocr_readings_history": deque(maxlen=MAX_OCR_HISTORY_PER_OBJECT),
                 "last_ocr_frame": -1,
                 "last_seen": frame_id,
                 "class_name": class_name,
@@ -453,13 +435,7 @@ class ObjectCache:
             self.cache[track_id]["ocr_readings_history"].extend(new_ocr_results)
             self.cache[track_id]["last_ocr_frame"] = frame_id
 
-            # Keep only the last N items in the history list.
-            # Python's slice assignment is very efficient for this.
-            ocr_history = self.cache[track_id]["ocr_readings_history"]
-            if len(ocr_history) > MAX_OCR_HISTORY_PER_OBJECT:
-                self.cache[track_id]["ocr_readings_history"] = ocr_history[-MAX_OCR_HISTORY_PER_OBJECT:]
-
-    def needs_ocr(self, track_id: int, current_frame_id: int, min_frames: int) -> bool:
+    def needs_ocr(self, track_id: int, current_frame_id: int, min_frames: int = MIN_FRAMES_FOR_OCR) -> bool:
         """
         Check if OCR processing is needed for this track.
         - The object must be tracked for a minimum number of frames.
@@ -552,7 +528,7 @@ class CropExtractor:
     def extract_crops_as_dict(img: np.ndarray, track_info: List[Tuple], object_cache: ObjectCache,
                               current_frame_id: int, min_frames: int = 15) -> Dict[int, np.ndarray]:
         """
-        Extracts SHRUNKEN crops for objects needing OCR and returns them in a
+        Extracts  crops for objects needing OCR and returns them in a
         dictionary keyed by their track_id.
         """
         crops_to_process = {}
@@ -560,41 +536,10 @@ class CropExtractor:
 
         for x1, y1, x2, y2, track_id, class_name, score in track_info:
             if object_cache.needs_ocr(track_id, current_frame_id, min_frames=min_frames):
-
-                # --- FIX STARTS HERE: Shrink the Bounding Box ---
-
-                # 1. Calculate original box width and height
-                box_w = x2 - x1
-                box_h = y2 - y1
-
-                # 2. Calculate the new, smaller width and height
-                new_w = box_w * CROP_SCALE_FACTOR
-                new_h = box_h * CROP_SCALE_FACTOR
-
-                # 3. Calculate the center of the box
-                center_x = x1 + box_w / 2
-                center_y = y1 + box_h / 2
-
-                # 4. Calculate new x1, y1, x2, y2 from the center
-                new_x1 = int(center_x - new_w / 2)
-                new_y1 = int(center_y - new_h / 2)
-                new_x2 = int(center_x + new_w / 2)
-                new_y2 = int(center_y + new_h / 2)
-
-                # 5. **Crucial Safety Check**: Ensure new coordinates are within image boundaries
-                new_x1 = max(0, new_x1)
-                new_y1 = max(0, new_y1)
-                new_x2 = min(img_w, new_x2)
-                new_y2 = min(img_h, new_y2)
-
-                # --- FIX ENDS HERE ---
-
-                # Use the new, safer coordinates for cropping
-                crop = img[new_y1:new_y2, new_x1:new_x2]
-
-                if crop.size > 0:
-                    crops_to_process[track_id] = crop
-
+                crop = img[y1:y2, x1:x2]
+                if crop.size == 0:
+                    continue
+                crops_to_process[track_id] = crop
         return crops_to_process
 
 
