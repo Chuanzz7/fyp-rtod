@@ -20,17 +20,18 @@ DEVICE = "cuda:0"
 OCR_CONFIDENCE_THRESHOLD = 0.5
 DETECTION_CONFIDENCE_THRESHOLD = 0.8
 MAX_TRACK_DISAPPEAR_FRAMES = 50
+CROP_SCALE_FACTOR = 0.85
 
 # Global buffers
 _input_tensor = None
 _orig_size = None
 
 # In your constants section or at the start of processor_tensor_main
-VIDEO_FPS = 30  # Assumed FPS of your input video stream
-OCR_INTERVAL_SECONDS = 1.0
+VIDEO_FPS = 15  # Assumed FPS of your input video stream
+OCR_INTERVAL_SECONDS = 2.0
 OCR_INTERVAL_FRAMES = int(VIDEO_FPS * OCR_INTERVAL_SECONDS)
-MIN_FRAMES_FOR_OCR = 15  # The number of frames an object must be stable before we start OCR
-MAX_OCR_HISTORY_PER_OBJECT = 20
+MIN_FRAMES_FOR_OCR = 5  # The number of frames an object must be stable before we start OCR
+MAX_OCR_HISTORY_PER_OBJECT = 10
 
 
 class GPUBufferManager:
@@ -452,13 +453,11 @@ class ObjectCache:
             self.cache[track_id]["ocr_readings_history"].extend(new_ocr_results)
             self.cache[track_id]["last_ocr_frame"] = frame_id
 
-            # --- THE NEW CODE TO LIMIT HISTORY SIZE ---
             # Keep only the last N items in the history list.
             # Python's slice assignment is very efficient for this.
             ocr_history = self.cache[track_id]["ocr_readings_history"]
             if len(ocr_history) > MAX_OCR_HISTORY_PER_OBJECT:
                 self.cache[track_id]["ocr_readings_history"] = ocr_history[-MAX_OCR_HISTORY_PER_OBJECT:]
-            # --- END OF NEW CODE ---
 
     def needs_ocr(self, track_id: int, current_frame_id: int, min_frames: int) -> bool:
         """
@@ -550,40 +549,52 @@ class CropExtractor:
     """Extracts image crops from tracked objects"""
 
     @staticmethod
-    def extract_crops(img: np.ndarray, track_info: List[Tuple], object_cache: ObjectCache,
-                      current_frame_id: int, min_frames: int = 15):  # Add current_frame_id
-        crops = []
-        crop_metadata = []
-        track_ids_needing_ocr = []
-
-        for x1, y1, x2, y2, track_id, class_name, score in track_info:
-            # Pass current_frame_id to the updated needs_ocr method
-            if object_cache.needs_ocr(track_id, current_frame_id, min_frames=min_frames):
-                crop = img[y1:y2, x1:x2]
-                if crop.size == 0:
-                    continue
-                crops.append(crop)
-                crop_metadata.append((x1, y1, x2, y2, track_id, class_name, score))
-                track_ids_needing_ocr.append(track_id)
-
-        return crops, crop_metadata, track_ids_needing_ocr
-
-    @staticmethod
     def extract_crops_as_dict(img: np.ndarray, track_info: List[Tuple], object_cache: ObjectCache,
-                              current_frame_id: int, min_frames: int = 15) -> Dict[
-        int, np.ndarray]:  # Add current_frame_id
+                              current_frame_id: int, min_frames: int = 15) -> Dict[int, np.ndarray]:
         """
-        Extracts crops for objects needing OCR and returns them in a dictionary
-        keyed by their track_id.
+        Extracts SHRUNKEN crops for objects needing OCR and returns them in a
+        dictionary keyed by their track_id.
         """
         crops_to_process = {}
+        img_h, img_w, _ = img.shape  # Get image boundaries
+
         for x1, y1, x2, y2, track_id, class_name, score in track_info:
-            # Pass current_frame_id to the updated needs_ocr method
             if object_cache.needs_ocr(track_id, current_frame_id, min_frames=min_frames):
-                crop = img[y1:y2, x1:x2]
-                if crop.size == 0:
-                    continue
-                crops_to_process[track_id] = crop
+
+                # --- FIX STARTS HERE: Shrink the Bounding Box ---
+
+                # 1. Calculate original box width and height
+                box_w = x2 - x1
+                box_h = y2 - y1
+
+                # 2. Calculate the new, smaller width and height
+                new_w = box_w * CROP_SCALE_FACTOR
+                new_h = box_h * CROP_SCALE_FACTOR
+
+                # 3. Calculate the center of the box
+                center_x = x1 + box_w / 2
+                center_y = y1 + box_h / 2
+
+                # 4. Calculate new x1, y1, x2, y2 from the center
+                new_x1 = int(center_x - new_w / 2)
+                new_y1 = int(center_y - new_h / 2)
+                new_x2 = int(center_x + new_w / 2)
+                new_y2 = int(center_y + new_h / 2)
+
+                # 5. **Crucial Safety Check**: Ensure new coordinates are within image boundaries
+                new_x1 = max(0, new_x1)
+                new_y1 = max(0, new_y1)
+                new_x2 = min(img_w, new_x2)
+                new_y2 = min(img_h, new_y2)
+
+                # --- FIX ENDS HERE ---
+
+                # Use the new, safer coordinates for cropping
+                crop = img[new_y1:new_y2, new_x1:new_x2]
+
+                if crop.size > 0:
+                    crops_to_process[track_id] = crop
+
         return crops_to_process
 
 

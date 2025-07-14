@@ -106,10 +106,7 @@ def draw_assigned_regions_on_frame(img_array, assigned_regions):
 
         # Choose color: left=blue, right=orange
         # OpenCV uses BGR format, so we need to convert RGB to BGR
-        if x1 == 0:
-            color_bgr = (255, 180, 80)  # Blue in BGR (was RGB 80, 180, 255)
-        else:
-            color_bgr = (80, 180, 255)  # Orange in BGR (was RGB 255, 180, 80)
+        color_bgr = (255, 180, 80)  # Blue in BGR (was RGB 80, 180, 255)
 
         # Draw rectangle
         cv2.rectangle(img_array, (x1, y1), (x2, y2), color=color_bgr, thickness=4)

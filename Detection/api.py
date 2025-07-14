@@ -218,17 +218,16 @@ def start():
     # Wait for the API to be up before sending /start_stream
     # Now tell the Pi to start sending frames
     try:
+        resp = requests.post(f"{PRODUCT_ENDPOINT}/api/stop_monitor", timeout=2)
+        print("Product response:", resp.text)
+    except Exception as e:
+        print("Failed to contact Product:", e)
+
+    try:
         resp = requests.post(f"{PI_URL}/stop_stream", timeout=2)
         print("Pi response:", resp.text)
     except Exception as e:
         print("Failed to contact Pi:", e)
-
-    try:
-        resp = requests.post(f"{PRODUCT_ENDPOINT}/api/stop_monitor", timeout=2)
-        print("Product response:", resp.text)
-
-    except Exception as e:
-        print("Failed to contact Product:", e)
 
 
 @app.get("/api/metrics")

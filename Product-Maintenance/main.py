@@ -89,7 +89,6 @@ async def batch_commit_products():
 
         # New DB session for this flush
         async for db in get_db():
-            print("run")
             # 1. Update detected products
             for product_id, info in updates.items():
                 await db.execute(
@@ -98,17 +97,12 @@ async def batch_commit_products():
                     .values(quantity=info["quantity"], inventoryStatus=info["inventoryStatus"])
                 )
             # 2. Set NOT detected products to 0/out_of_stock
-            all_ids = set()
-            result = await db.execute(select(Product.id))
-            for pid, in result:
-                all_ids.add(pid)
-            undetected_ids = all_ids - set(updates.keys())
-            if undetected_ids:
-                await db.execute(
-                    update(Product)
-                    .where(Product.id.in_(undetected_ids))
-                    .values(quantity=0, inventoryStatus="out_of_stock")
-                )
+
+            await db.execute(
+                update(Product)
+                .where(Product.id.notin_(updates.keys()))
+                .values(quantity=0, inventoryStatus="out_of_stock")
+            )
             await db.commit()
             break  # Only want one DB instance per cycle
 
@@ -397,12 +391,12 @@ async def batch_fuzzy_product_lookup(
     found_ids = set()
 
     for item in items:
-
+        # Check track_id cache first to avoid re-processing
         async with trackid_cache_lock:
             cached_result = trackid_cache.get(item.track_id)
         if cached_result:
             results.append(cached_result)
-            continue  # Skip the DB query, go to next item
+            continue  # Skip DB query and logic, go to the next item
 
         try:
             clean_ocr = re.sub(r'\s+', '', item.ocr).lower()
@@ -410,26 +404,40 @@ async def batch_fuzzy_product_lookup(
                          SELECT *, similarity(ocr_normalized, :clean_ocr) AS sim
                          FROM products
                          WHERE ocr_normalized % :clean_ocr
-                  AND category = :category
+                         AND category = :category
                          ORDER BY sim DESC
                              LIMIT 1
                          """)
             result = await db.execute(query, {"clean_ocr": clean_ocr, "category": item.category})
             row = result.first()
+
             if row:
                 product = dict(row._mapping)
                 confidence = float(product.pop("sim"))
                 product_id = product.get("id")
                 found_ids.add(product_id)
-                new_qty = getattr(item, "count", 1)
-                if new_qty > LOW_STOCK_THRESHOLD:
-                    status = "in_stock"
-                elif new_qty == LOW_STOCK_THRESHOLD:
-                    status = "low_stock"
-                else:
-                    status = "out_of_stock"
+                qty_from_this_item = getattr(item, "count", 1)
+
+                # This block now correctly accumulates the quantity.
                 async with cache_lock:
-                    product_cache[product_id] = {"quantity": new_qty, "inventoryStatus": status}
+                    # 1. Read the existing quantity from the cache for this product_id
+                    existing_data = product_cache.get(product_id, {"quantity": 0})
+                    existing_qty = existing_data.get("quantity", 0)
+
+                    # 2. Modify by adding the new item's count
+                    new_total_qty = existing_qty + qty_from_this_item
+
+                    # 3. Determine the inventory status based on the NEW TOTAL
+                    if new_total_qty > LOW_STOCK_THRESHOLD:
+                        status = "in_stock"
+                    elif new_total_qty == LOW_STOCK_THRESHOLD:
+                        status = "low_stock"
+                    else:
+                        status = "out_of_stock"
+
+                    # 4. Write the updated total quantity and status back to the cache
+                    product_cache[product_id] = {"quantity": new_total_qty, "inventoryStatus": status}
+
                 response_item = ProductLookupResponse(
                     track_id=item.track_id,
                     code=product.get("code"),
@@ -437,6 +445,7 @@ async def batch_fuzzy_product_lookup(
                     category=product.get("category")
                 )
             else:
+                # Product not found in the database
                 response_item = ProductLookupResponse(
                     track_id=item.track_id,
                     code=None,
@@ -444,9 +453,11 @@ async def batch_fuzzy_product_lookup(
                     category=item.category
                 )
 
+            # Cache the response for this specific track_id
             async with trackid_cache_lock:
                 trackid_cache[item.track_id] = response_item
             results.append(response_item)
+
         except Exception as e:
             print(f"Error processing item {getattr(item, 'track_id', None)}: {e}")
             response_item = ProductLookupResponse(
@@ -456,11 +467,12 @@ async def batch_fuzzy_product_lookup(
                 category=getattr(item, 'category', None)
             )
             results.append(response_item)
-    # Update detected IDs for background task
+
+    # Update the set of all detected product IDs for a background task
     async with cache_lock:
         detected_product_ids.update(found_ids)
-    return BatchProductLookupResponse(results=results)
 
+    return BatchProductLookupResponse(results=results)
 
 @app.post("/api/detect_item")
 async def upload_frame(image: UploadFile = File(...)):
