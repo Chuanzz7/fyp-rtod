@@ -21,7 +21,7 @@ from models.schemas import ProductOut, BatchProductLookupResponse, BatchProductL
 
 # Allow your frontend origin, or use ["*"] for any (dev only!)
 origins = [
-    "http://localhost:5173",
+    "*",
     # add more origins if needed, e.g. "http://127.0.0.1:5173"
 ]
 
