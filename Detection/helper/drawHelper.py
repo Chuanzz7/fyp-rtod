@@ -1,5 +1,7 @@
 import cv2
 
+from Detection.helper.dataClass import COCO_CLASSES
+
 
 def draw(img, labels, boxes, scores, thrh=0.4):
     """
@@ -22,16 +24,16 @@ def draw(img, labels, boxes, scores, thrh=0.4):
     lab = labels[mask]
     box = boxes[mask]
     scrs = scr[mask]
-
     for j, b in enumerate(box):
         # Convert box coordinates to integers
         x1, y1, x2, y2 = map(int, b)
 
         # Draw rectangle (BGR format for OpenCV)
         cv2.rectangle(img_copy, (x1, y1), (x2, y2), color=(0, 0, 255), thickness=2)  # Red
+        class_name = COCO_CLASSES[lab[j].item()] if lab[j].item() < len(COCO_CLASSES) else f"Class_{lab[j].item()}"
 
         # Prepare text
-        text = f"{lab[j].item()} {round(scrs[j].item(), 2)}"
+        text = f"{class_name} {round(scrs[j].item(), 2)}"
 
         # Get text size for background rectangle
         font = cv2.FONT_HERSHEY_SIMPLEX
