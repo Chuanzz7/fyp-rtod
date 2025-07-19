@@ -3,13 +3,14 @@ import time
 from typing import List, Optional
 
 import requests
-from fastapi import FastAPI, Request
+from fastapi import FastAPI, Request, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
-from starlette.responses import StreamingResponse
+from starlette.responses import StreamingResponse, Response
 
 from Detection.helper.apiHelper import PI_URL, PRODUCT_ENDPOINT
-
+STARTED = False
+started_lock = asyncio.Lock()
 # Allow your frontend origin, or use ["*"] for any (dev only!)
 origins = [
     "*",
@@ -65,6 +66,10 @@ def inject_queues(frame_queue, mjpeg_queue, shared_config, shared_metrics):
 
 async def qps_logger(interval=1):
     while True:
+        async with started_lock:
+            if not STARTED:
+                await asyncio.sleep(1)
+                continue  # Wait until started
         await asyncio.sleep(interval)
         count = app.state.upload_counter
         app.state.upload_counter = 0
@@ -195,7 +200,9 @@ def health():
 
 
 @app.post("/start")
-def start():
+async def start():
+    global STARTED
+
     # Wait for the API to be up before sending /start_stream
     # Now tell the Pi to start sending frames
     try:
@@ -212,9 +219,15 @@ def start():
     except Exception as e:
         print("Failed to contact Product:", e)
 
+    async with started_lock:
+        if not STARTED:
+            STARTED = True
+
 
 @app.post("/stop")
-def start():
+async def start():
+    global STARTED
+
     # Wait for the API to be up before sending /start_stream
     # Now tell the Pi to start sending frames
     try:
@@ -228,6 +241,10 @@ def start():
         print("Pi response:", resp.text)
     except Exception as e:
         print("Failed to contact Pi:", e)
+
+    async with started_lock:
+        if STARTED:
+            STARTED = False
 
 
 @app.get("/api/metrics")
@@ -243,3 +260,19 @@ async def get_metrics():
                 "count": len(values)
             }
     return {"status": "success", "metrics": stats}
+
+
+@app.get("/api/photo")
+async def get_photo_from_pi():
+    """
+    Call Raspberry Pi /shoot_photo, relay JPEG to frontend.
+    """
+    try:
+        pi_response = requests.get(f"{PI_URL}/photo", timeout=5)
+        if pi_response.status_code == 200:
+            # Relay as image/jpeg to frontend
+            return Response(content=pi_response.content, media_type="image/jpeg")
+        else:
+            raise HTTPException(status_code=502, detail=f"Pi error: {pi_response.status_code}")
+    except Exception as e:
+        raise HTTPException(status_code=504, detail=f"Failed to get photo from Pi: {e}")

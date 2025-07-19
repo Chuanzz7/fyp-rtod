@@ -27,7 +27,7 @@ _input_tensor = None
 _orig_size = None
 
 # In your constants section or at the start of processor_tensor_main
-VIDEO_FPS = 20  # Assumed FPS of your input video stream
+VIDEO_FPS = 15  # Assumed FPS of your input video stream
 OCR_INTERVAL_SECONDS = 2.0
 OCR_INTERVAL_FRAMES = int(VIDEO_FPS * OCR_INTERVAL_SECONDS)
 MIN_FRAMES_FOR_OCR = 5  # The number of frames an object must be stable before we start OCR
